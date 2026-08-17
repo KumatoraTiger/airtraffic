@@ -1,18 +1,21 @@
 import AirtrafficCore
 import SwiftUI
 
-/// The unified board: a priority-ordered task list with live execution state
-/// attached. Sections, in the order the user should spend attention:
+/// The unified board: a priority-ordered task list with execution state
+/// attached. Session status only paints badges on rows; it never moves a row
+/// between sections. Sections, in the order the user should spend attention:
 ///
-/// - 要対応: executions waiting on the user, recent enough to act on
-/// - タスク: the priority list itself — every task, running or not, in rank order
+/// - タスク: the priority list itself — every open task, in rank order,
+///   with its linked sessions hanging under it as a tree
 /// - 提案: LLM-extracted candidates; optional, expire untouched
-/// - タスク外の動き: live agent activity that matches no task
-/// - 最近消えたもの: a revertable trail of what left the board
+/// - タスク外の動き: agent activity matching no task, active within 24 hours
+/// - 完了: done tasks (with their sessions), aged-out activity, expired proposals
+/// - キャンセル: rejected proposals
 struct BoardView: View {
     @Environment(AppModel.self) private var model
     @State private var newTitle = ""
-    @State private var showClosed = false
+    @State private var showDone = false
+    @State private var showCancelled = false
     @State private var showAllProposals = false
 
     /// Proposals shown before the fold. Enough to notice fresh ones without
@@ -27,55 +30,49 @@ struct BoardView: View {
                     systemImage: "airplane.departure",
                     description: Text("coding agent のセッションが動き出すと、ここに映ります"))
             }
-            entrySection(
-                attention, title: "要対応", symbol: "exclamationmark.triangle.fill",
-                color: .orange, tinted: true)
             taskSection
             proposalSection
             entrySection(
                 activity, title: "タスク外の動き", symbol: "antenna.radiowaves.left.and.right",
-                color: .gray, tinted: false)
-            closedSection
+                color: .gray)
+            doneSection
+            cancelledSection
         }
     }
 
     // MARK: - Row selection
 
-    private var attention: [BoardEntry] {
-        model.boardEntries
-            .filter { $0.needsAttention() }
-            .sorted {
-                let l = $0.liveStatus?.sortOrder ?? .max
-                let r = $1.liveStatus?.sortOrder ?? .max
-                if l != r { return l < r }
-                return ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast)
-            }
-    }
-
-    /// The priority list: every persistent task not pulled up into 要対応,
-    /// in rank order (as the store returns them). Running tasks stay here —
-    /// execution state is a badge on the row, not a place of its own.
+    /// The priority list: every open task in rank order (as the store returns
+    /// them). Waiting or running executions are badges on the row, never a
+    /// reason to move it.
     private var taskEntries: [BoardEntry] {
-        model.boardEntries.filter { $0.task != nil && !$0.needsAttention() }
+        model.boardEntries.filter { entry in
+            guard let task = entry.task else { return false }
+            return task.status != .done
+        }
     }
 
-    /// Live agent activity that matches no task. Not part of the priority
-    /// list until the user keeps it; stale waits land here too.
+    /// Agent activity matching no task, active within the last 24 hours,
+    /// newest first. Rows here can be promoted to a task or linked to one.
     private var activity: [BoardEntry] {
-        model.boardEntries.filter { $0.task == nil && $0.isLive && !$0.needsAttention() }
+        model.boardEntries
+            .filter { $0.task == nil && $0.isRecent() }
+            .sorted { ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast) }
     }
 
-    /// Auto entries whose executions have all gone quiet: work that just
-    /// disappeared from the live sections, still revertable via 「残す」.
-    private var stopped: [BoardEntry] {
-        model.boardEntries.filter { $0.task == nil && !$0.isLive }
+    /// Taskless activity that aged past the 24-hour window: treated as
+    /// finished, still revertable via 「残す」.
+    private var agedOut: [BoardEntry] {
+        model.boardEntries.filter { $0.task == nil && !$0.isRecent() }
     }
 
-    private var doneTasks: [TaskItem] {
+    /// Done tasks, newest completion first. Their linked sessions stay
+    /// attached, so completing a task takes its whole tree along.
+    private var doneEntries: [BoardEntry] {
         Array(
-            model.tasks
-                .filter { $0.status == .done }
-                .sorted { $0.updatedAt > $1.updatedAt }
+            model.boardEntries
+                .filter { $0.task?.status == .done }
+                .sorted { ($0.task?.updatedAt ?? .distantPast) > ($1.task?.updatedAt ?? .distantPast) }
                 .prefix(10))
     }
 
@@ -83,16 +80,12 @@ struct BoardView: View {
 
     @ViewBuilder
     private func entrySection(
-        _ entries: [BoardEntry], title: String, symbol: String, color: Color, tinted: Bool
+        _ entries: [BoardEntry], title: String, symbol: String, color: Color
     ) -> some View {
         if !entries.isEmpty {
             Section {
                 ForEach(entries) { entry in
                     EntryRow(entry: entry)
-                        .listRowBackground(
-                            tinted
-                                ? statusColor(entry.liveStatus ?? .idle).opacity(0.06)
-                                : Color.clear)
                 }
             } header: {
                 Label("\(title) (\(entries.count))", systemImage: symbol)
@@ -158,41 +151,65 @@ struct BoardView: View {
         }
     }
 
-    /// Everything that recently left the board, brought back with one click:
-    /// stopped sessions via 「残す」, rejected / expired proposals via 「戻す」,
-    /// done tasks via their checkmark.
+    /// Finished work, brought back with one click: done tasks (their sessions
+    /// still attached) via the checkmark, aged-out activity via 「残す」,
+    /// expired proposals via 「戻す」.
     @ViewBuilder
-    private var closedSection: some View {
-        let count = stopped.count + model.closedCandidates.count + doneTasks.count
+    private var doneSection: some View {
+        let count = doneEntries.count + agedOut.count + model.expiredCandidates.count
         if count > 0 {
             Section {
-                if showClosed {
-                    ForEach(stopped) { entry in
+                if showDone {
+                    ForEach(doneEntries) { entry in
                         EntryRow(entry: entry)
                     }
-                    ForEach(model.closedCandidates) { candidate in
-                        ClosedProposalRow(candidate: candidate)
+                    ForEach(agedOut) { entry in
+                        EntryRow(entry: entry)
                     }
-                    ForEach(doneTasks) { task in
-                        TaskRow(task: task)
+                    ForEach(model.expiredCandidates) { candidate in
+                        ClosedProposalRow(candidate: candidate)
                     }
                 }
             } header: {
-                Button {
-                    withAnimation { showClosed.toggle() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: showClosed ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                        Label(
-                            "最近消えたもの (\(count))",
-                            systemImage: "clock.arrow.circlepath")
-                    }
-                    .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+                collapsibleHeader(
+                    "完了 (\(count))", symbol: "checkmark.circle", expanded: $showDone)
             }
         }
+    }
+
+    /// Rejected proposals live apart from 完了: the user turned these down,
+    /// nothing here finished.
+    @ViewBuilder
+    private var cancelledSection: some View {
+        if !model.rejectedCandidates.isEmpty {
+            Section {
+                if showCancelled {
+                    ForEach(model.rejectedCandidates) { candidate in
+                        ClosedProposalRow(candidate: candidate)
+                    }
+                }
+            } header: {
+                collapsibleHeader(
+                    "キャンセル (\(model.rejectedCandidates.count))",
+                    symbol: "xmark.circle", expanded: $showCancelled)
+            }
+        }
+    }
+
+    private func collapsibleHeader(
+        _ title: String, symbol: String, expanded: Binding<Bool>
+    ) -> some View {
+        Button {
+            withAnimation { expanded.wrappedValue.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.caption2)
+                Label(title, systemImage: symbol)
+            }
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     private func submit() {

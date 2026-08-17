@@ -45,9 +45,11 @@ struct ServiceTests {
             todos: [], lastUserText: "", lastAssistantText: "", newTranscriptText: "")
     }
 
-    private func task(id: String, title: String, sessionIds: [String] = []) -> TaskItem {
+    private func task(
+        id: String, title: String, sessionIds: [String] = [], status: TaskStatus = .todo
+    ) -> TaskItem {
         TaskItem(
-            id: id, title: title, detail: "", status: .todo, rank: nil, source: .manual,
+            id: id, title: title, detail: "", status: status, rank: nil, source: .manual,
             createdAt: Date(), updatedAt: Date(), sessionIds: sessionIds)
     }
 
@@ -78,8 +80,11 @@ struct ServiceTests {
         await TestKit.shared.run("board: unmatched same-title sessions collapse into one entry") {
             let sessions = [
                 session(id: "claude:s-1", title: "タスクの重複対策", status: .waitingInput),
-                // The same conversation imported under another agent.
-                session(id: "codex:s-2", title: "タスクの重複対策", agent: .codex, status: .idle),
+                // The same conversation imported under another agent, last
+                // touched earlier — recency puts it second.
+                session(
+                    id: "codex:s-2", title: "タスクの重複対策", agent: .codex, status: .idle,
+                    lastActivity: Date(timeIntervalSinceNow: -60)),
                 // Same title in another project stays separate.
                 session(id: "claude:s-3", title: "タスクの重複対策", cwd: "/Users/alex/src/other"),
                 // Untitled sessions never merge with each other.
@@ -105,20 +110,56 @@ struct ServiceTests {
             expect(!entry.isLive, "idle sessions mean the entry has stopped")
         }
 
-        await TestKit.shared.run("board: stale waits leave 要対応 but stay live") {
+        await TestKit.shared.run("board: taskless entries age off the live board after 24h") {
             let entries = BoardAssembler.assemble(
                 tasks: [],
                 sessions: [
-                    session(id: "claude:s-1", title: "新しい待ち", status: .waitingInput),
+                    session(id: "claude:s-1", title: "新しい作業", status: .waitingInput),
                     session(
-                        id: "claude:s-2", title: "放置された待ち", status: .waitingInput,
-                        lastActivity: Date(timeIntervalSinceNow: -7200)),
+                        id: "claude:s-2", title: "古い作業", status: .waitingInput,
+                        lastActivity: Date(timeIntervalSinceNow: -25 * 3600)),
                 ])
             let fresh = try unwrap(entries.first { $0.sessions.first?.id == "claude:s-1" })
-            let stale = try unwrap(entries.first { $0.sessions.first?.id == "claude:s-2" })
-            expect(fresh.needsAttention(), "a fresh wait is actionable")
-            expect(!stale.needsAttention(), "a wait hours old is effectively abandoned")
-            expect(stale.isLive, "stale waits still show as activity, just not as 要対応")
+            let aged = try unwrap(entries.first { $0.sessions.first?.id == "claude:s-2" })
+            expect(fresh.isRecent(), "activity within 24h stays on the live board")
+            expect(!aged.isRecent(), "older activity counts as finished and moves to 完了")
+        }
+
+        await TestKit.shared.run("board: attached sessions order by recency, newest first") {
+            let now = Date()
+            let tasks = [
+                task(id: "t-1", title: "認証を直す", sessionIds: ["claude:s-1", "claude:s-2"])
+            ]
+            let entries = BoardAssembler.assemble(
+                tasks: tasks,
+                sessions: [
+                    session(
+                        id: "claude:s-1", title: "a", status: .waitingApproval,
+                        lastActivity: now.addingTimeInterval(-600)),
+                    session(id: "claude:s-2", title: "b", status: .idle, lastActivity: now),
+                ])
+            let entry = try unwrap(entries.first)
+            // Urgency no longer reorders the tree; it only feeds the badge.
+            expectEqual(entry.sessions.map(\.id), ["claude:s-2", "claude:s-1"])
+            expectEqual(entry.liveStatus, .waitingApproval)
+        }
+
+        await TestKit.shared.run("board: a done task attaches only its linked sessions") {
+            let tasks = [
+                task(id: "t-1", title: "READMEを更新する", sessionIds: ["claude:s-1"], status: .done)
+            ]
+            let entries = BoardAssembler.assemble(
+                tasks: tasks,
+                sessions: [
+                    session(id: "claude:s-1", title: "別の名前の作業"),
+                    // Title-similar but unlinked: must stay live, not vanish
+                    // into the done task.
+                    session(id: "claude:s-2", title: "README を更新する"),
+                ])
+            let done = try unwrap(entries.first { $0.task?.id == "t-1" })
+            expectEqual(done.sessions.map(\.id), ["claude:s-1"])
+            let live = try unwrap(entries.first { $0.task == nil })
+            expectEqual(live.sessions.map(\.id), ["claude:s-2"])
         }
 
         await TestKit.shared.run("board: session titles compact into task-like labels") {

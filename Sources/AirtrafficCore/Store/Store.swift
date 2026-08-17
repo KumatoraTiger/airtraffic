@@ -219,9 +219,10 @@ public actor Store {
         return rows.map(Self.candidate(from:))
     }
 
-    /// Candidates that were rejected or expired, newest close first. These feed
-    /// the board's "recently disappeared" section, where any of them can be
-    /// reopened. Kept (accepted) candidates live on as tasks and are excluded.
+    /// Candidates that were rejected or expired, newest close first. These
+    /// feed the board's 完了 (expired) and キャンセル (rejected) sections,
+    /// where any of them can be reopened. Kept (accepted) candidates live on
+    /// as tasks and are excluded.
     public func closedCandidates(limit: Int = 30) throws -> [Candidate] {
         let rows = try db.query(
             """

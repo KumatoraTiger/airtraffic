@@ -22,8 +22,8 @@ struct AirtrafficApp: App {
             MenuBarContent()
                 .environment(model)
         } label: {
-            if model.attentionCount > 0 {
-                Label("\(model.attentionCount)", systemImage: "airplane.circle.fill")
+            if model.waitingCount > 0 {
+                Label("\(model.waitingCount)", systemImage: "airplane.circle.fill")
             } else {
                 Image(systemName: "airplane.circle")
             }
@@ -36,7 +36,7 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let waiting = model.attentionEntries
+        let waiting = model.waitingEntries
         if waiting.isEmpty {
             Text("対応待ちのタスクはありません")
         } else {

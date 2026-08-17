@@ -2,8 +2,8 @@ import AirtrafficCore
 import SwiftUI
 
 enum Lane: String, CaseIterable, Identifiable {
-    /// The unified board: sessions grouped by project, AI proposals inline,
-    /// pinned tasks, and a revertable trail of recently disappeared items.
+    /// The unified board: the task list with executions attached, AI
+    /// proposals inline, and revertable 完了 / キャンセル trails.
     case board
     case chat
 
@@ -238,7 +238,7 @@ struct RootView: View {
 
     private func badgeCount(for lane: Lane) -> Int? {
         switch lane {
-        case .board: model.attentionCount
+        case .board: model.waitingCount
         default: nil
         }
     }
@@ -342,8 +342,8 @@ private struct LaneColumn: View {
     @ViewBuilder
     private var headerBadge: some View {
         if lane == .board {
-            if model.attentionCount > 0 {
-                countBadge(model.attentionCount, color: .orange)
+            if model.waitingCount > 0 {
+                countBadge(model.waitingCount, color: .orange)
             }
             if !model.candidates.isEmpty {
                 countBadge(model.candidates.count, color: .purple)

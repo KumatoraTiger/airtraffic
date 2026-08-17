@@ -4,10 +4,11 @@ import SwiftUI
 /// One unit of work on the board, task-first. A persistent task leads with
 /// its done-toggle like any task list; execution state (agents, status) is
 /// trailing decoration that appears only while something is actually running.
-/// Auto-materialized entries lead with their status symbol and carry a
-/// 「残す」 button; everything else about them is hands-off. Tapping expands
-/// the detail and the attached executions, whose todos can be promoted into
-/// persistent tasks.
+/// Its linked sessions hang under it as a tree, newest first, three at most —
+/// and stay there until the task itself is done. Auto-materialized entries
+/// lead with their status symbol and carry 「残す」 (promote to a task) and
+/// 「紐づけ」 (attach to an existing task). Tapping expands the detail and
+/// the attached executions, whose todos can be promoted into persistent tasks.
 struct EntryRow: View {
     @Environment(AppModel.self) private var model
     let entry: BoardEntry
@@ -43,6 +44,7 @@ struct EntryRow: View {
                 }
                 Text(entry.title)
                     .fontWeight(.medium)
+                    .strikethrough(entry.task?.status == .done)
                     .lineLimit(1)
                 Spacer()
                 if let project = entry.sessions.first?.projectName {
@@ -76,9 +78,12 @@ struct EntryRow: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("タスクとして残す（セッションが終わっても消えなくなります）")
+                    linkMenu
                 }
             }
-            if let nowDoing {
+            if entry.task != nil {
+                sessionTree
+            } else if let nowDoing {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "arrow.turn.down.right")
                         .font(.caption2)
@@ -108,10 +113,76 @@ struct EntryRow: View {
         .onTapGesture { withAnimation { expanded.toggle() } }
         .contextMenu {
             if let task = entry.task {
-                Button("完了にする") { Task { await model.setTaskStatus(task, .done) } }
+                if task.status == .done {
+                    Button("未完了に戻す") { Task { await model.setTaskStatus(task, .todo) } }
+                } else {
+                    Button("完了にする") { Task { await model.setTaskStatus(task, .done) } }
+                }
                 Button("アーカイブ") { Task { await model.setTaskStatus(task, .archived) } }
             }
         }
+    }
+
+    /// The linked executions, hanging under the task as a tree: newest
+    /// activity first, three at most. They never leave on their own — only
+    /// completing the task takes them off the board.
+    @ViewBuilder
+    private var sessionTree: some View {
+        ForEach(entry.sessions.prefix(3)) { session in
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Image(systemName: statusSymbol(session.status))
+                    .font(.caption)
+                    .foregroundStyle(statusColor(session.status))
+                Text(sessionLabel(session))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text(session.status.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(statusColor(session.status))
+                Text(session.lastActivity, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.leading, 2)
+        }
+        if entry.sessions.count > 3 {
+            Text("他 \(entry.sessions.count - 3) 件（タップで表示）")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 20)
+        }
+    }
+
+    private func sessionLabel(_ session: SessionSnapshot) -> String {
+        let title = TitleCleaner.taskLabel(session.title)
+        return title.isEmpty ? session.agent.displayName : title
+    }
+
+    /// Attaches this taskless entry to an existing open task.
+    private var linkMenu: some View {
+        Menu {
+            ForEach(openTasks) { task in
+                Button(task.title) {
+                    Task { await model.linkEntry(entry, to: task) }
+                }
+            }
+        } label: {
+            Text("紐づけ")
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(openTasks.isEmpty)
+        .help("既存のタスクに紐づける（タスクの下にぶら下がります）")
+    }
+
+    private var openTasks: [TaskItem] {
+        model.tasks.filter { $0.status != .done && $0.status != .archived }
     }
 
     private var agents: [AgentKind] {

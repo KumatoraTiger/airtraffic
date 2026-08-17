@@ -7,7 +7,7 @@ public struct BoardEntry: Identifiable, Sendable {
     public var id: String
     /// Nil for auto-materialized entries (session activity with no task).
     public var task: TaskItem?
-    /// Executions attached to this entry, most urgent first.
+    /// Executions attached to this entry, most recent activity first.
     public var sessions: [SessionSnapshot]
     /// What this work *is* ("レビュー: 認証APIの差分"), when the LLM has
     /// labeled it. Nil until then; everything falls back to session titles.
@@ -43,16 +43,14 @@ public struct BoardEntry: Identifiable, Sendable {
         return liveStatus != .idle
     }
 
-    /// How long a waiting execution counts as actionable. A session that has
-    /// been waiting longer was effectively abandoned; keeping it in 要対応
-    /// only buries the waits the user can still act on.
-    public static let attentionWindow: TimeInterval = 3600
+    /// How long a taskless entry stays among the live activity after its last
+    /// update. Beyond this the work is treated as finished and moves to 完了.
+    public static let activityWindow: TimeInterval = 24 * 3600
 
-    /// True when an execution is waiting on the user *and* recent enough
-    /// that answering it is plausibly still useful.
-    public func needsAttention(now: Date = Date()) -> Bool {
-        guard let liveStatus, liveStatus.needsAttention, let lastActivity else { return false }
-        return now.timeIntervalSince(lastActivity) < Self.attentionWindow
+    /// True while the entry saw any activity within the last 24 hours.
+    public func isRecent(now: Date = Date()) -> Bool {
+        guard let lastActivity else { return false }
+        return now.timeIntervalSince(lastActivity) < Self.activityWindow
     }
 }
 
@@ -113,6 +111,9 @@ public enum BoardAssembler {
         labels: [String: WorkLabel]
     ) -> Bool {
         if linked.contains(session.id) { return true }
+        // A done task keeps only what the user explicitly tied to it; new
+        // activity that merely shares its title must stay on the live board.
+        if task.status == .done { return false }
         if TitleMatcher.isSimilar(session.title, task.title) { return true }
         guard let label = labels[session.id], !label.isPlaceholder else { return false }
         return TitleMatcher.isSimilar(label.subject, task.title)
@@ -135,11 +136,6 @@ public enum BoardAssembler {
     }
 
     private static func sort(_ sessions: [SessionSnapshot]) -> [SessionSnapshot] {
-        sessions.sorted {
-            if $0.status.sortOrder != $1.status.sortOrder {
-                return $0.status.sortOrder < $1.status.sortOrder
-            }
-            return $0.lastActivity > $1.lastActivity
-        }
+        sessions.sorted { $0.lastActivity > $1.lastActivity }
     }
 }

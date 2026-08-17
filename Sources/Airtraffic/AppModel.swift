@@ -41,19 +41,29 @@ final class AppModel {
         }
     }
 
-    /// Entries the user can still usefully act on — same recency rule as the
-    /// board's 要対応 section, so every badge agrees with what the board shows.
-    var attentionEntries: [BoardEntry] { boardEntries.filter { $0.needsAttention() } }
-    var attentionCount: Int { attentionEntries.count }
-
-    /// Unified board rows: tasks with their live executions attached, plus
-    /// session activity that matches no task, materialized as its own rows.
-    /// Done tasks stay out; they only appear in the "recently disappeared"
-    /// section, straight from `tasks`.
-    var boardEntries: [BoardEntry] {
-        BoardAssembler.assemble(
-            tasks: tasks.filter { $0.status != .done }, sessions: sessions, labels: labels)
+    /// Entries with an execution waiting on the user, among what the live
+    /// sections show. Status never moves a row anymore; this only feeds the
+    /// lane badges and the menu bar.
+    var waitingEntries: [BoardEntry] {
+        boardEntries.filter { entry in
+            guard entry.liveStatus?.needsAttention == true else { return false }
+            if let task = entry.task { return task.status != .done }
+            return entry.isRecent()
+        }
     }
+    var waitingCount: Int { waitingEntries.count }
+
+    /// Unified board rows: tasks with their executions attached, plus session
+    /// activity that matches no task, materialized as its own rows. Done tasks
+    /// are included (with their linked sessions); the view puts them in 完了.
+    var boardEntries: [BoardEntry] {
+        BoardAssembler.assemble(tasks: tasks, sessions: sessions, labels: labels)
+    }
+
+    /// Proposals that expired untouched; shown inside 完了.
+    var expiredCandidates: [Candidate] { closedCandidates.filter { $0.status == .expired } }
+    /// Proposals the user rejected; shown inside キャンセル.
+    var rejectedCandidates: [Candidate] { closedCandidates.filter { $0.status == .rejected } }
 
     // MARK: - Internals
 
@@ -279,8 +289,8 @@ final class AppModel {
     }
 
     /// Persists an auto-materialized entry as a task, so it survives its
-    /// sessions going quiet. Also the way a stopped entry is brought back
-    /// from the "recently disappeared" section.
+    /// sessions going quiet. Also the way an aged-out entry is brought back
+    /// from the 完了 section.
     func keepEntry(_ entry: BoardEntry) async {
         guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
         let task = TaskItem(
@@ -289,6 +299,18 @@ final class AppModel {
             source: .deterministic, createdAt: Date(), updatedAt: Date(),
             sessionIds: entry.sessions.map(\.id))
         try? await store.upsertTask(task)
+        await refreshLists()
+    }
+
+    /// Ties a taskless entry's sessions to an existing task. The entry's row
+    /// disappears into the task, which shows them as its executions from then
+    /// on — and keeps them until the task itself is done.
+    func linkEntry(_ entry: BoardEntry, to task: TaskItem) async {
+        guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
+        var updated = task
+        updated.sessionIds.append(contentsOf: entry.sessions.map(\.id))
+        updated.updatedAt = Date()
+        try? await store.upsertTask(updated)
         await refreshLists()
     }
 
