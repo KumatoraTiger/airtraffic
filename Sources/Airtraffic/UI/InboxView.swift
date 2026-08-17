@@ -58,8 +58,7 @@ struct CandidateRow: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                Button("却下") { showRejectReason = true }
-                    .controlSize(.small)
+                rejectMenu
             }
         }
         .padding(.vertical, 6)
@@ -84,6 +83,32 @@ struct CandidateRow: View {
             }
             .padding()
         }
+    }
+
+    /// Reject reasons are one click each; free text stays available under 「その他…」.
+    private var rejectMenu: some View {
+        Menu {
+            ForEach(RejectReasonPreset.allCases) { preset in
+                Button {
+                    Task { await model.reject(candidate, reason: preset.rawValue) }
+                } label: {
+                    Label(preset.label, systemImage: preset.symbol)
+                }
+            }
+            Divider()
+            Button("理由なしで却下") {
+                Task { await model.reject(candidate, reason: nil) }
+            }
+            Button("その他…") {
+                rejectReason = ""
+                showRejectReason = true
+            }
+        } label: {
+            Text("却下")
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .fixedSize()
     }
 
     private var confidenceBadge: some View {

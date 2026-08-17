@@ -175,6 +175,33 @@ public enum CandidateStatus: String, Codable, Sendable {
     case expired
 }
 
+/// Frequently used reject reasons, offered as one-click choices in the inbox.
+/// The raw value is stored as the candidate's reject reason and later fed back
+/// into extraction prompts as a negative example, so keep the wording concise
+/// and self-explanatory.
+public enum RejectReasonPreset: String, CaseIterable, Identifiable, Sendable {
+    case notATask = "タスクではない"
+    case alreadyDone = "既に完了している"
+    case duplicate = "既存のタスクと重複している"
+    case handledByAgent = "エージェント側で完結する"
+    case notNeeded = "対応不要と判断した"
+
+    public var id: String { rawValue }
+
+    /// Button label shown in the inbox menu.
+    public var label: String { rawValue }
+
+    public var symbol: String {
+        switch self {
+        case .notATask: return "xmark.circle"
+        case .alreadyDone: return "checkmark.circle"
+        case .duplicate: return "doc.on.doc"
+        case .handledByAgent: return "cpu"
+        case .notNeeded: return "hand.raised"
+        }
+    }
+}
+
 /// An LLM-extracted task candidate. Lives in the inbox until the user accepts or rejects it.
 public struct Candidate: Identifiable, Hashable, Sendable {
     public var id: String

@@ -55,6 +55,30 @@ struct StoreTests {
             expectEqual(try await store.rejectedTitles(), ["update readme"])
         }
 
+        await TestKit.shared.run("store: one-click reject reason presets round-trip") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            expect(!RejectReasonPreset.allCases.isEmpty, "presets should not be empty")
+            expectEqual(
+                Set(RejectReasonPreset.allCases.map(\.rawValue)).count,
+                RejectReasonPreset.allCases.count)
+
+            for (index, preset) in RejectReasonPreset.allCases.enumerated() {
+                let candidate = Candidate(
+                    id: "c-\(index)", title: "title \(index)", detail: "", confidence: 0.6,
+                    sessionId: "claude:s-1", agent: .claudeCode, excerpt: "",
+                    status: .pending, createdAt: Date(), rejectReason: nil
+                )
+                try await store.insertCandidate(candidate)
+                try await store.setCandidateStatus(
+                    candidate.id, .rejected, rejectReason: preset.rawValue)
+            }
+            let rejected = try await store.candidates(status: .rejected)
+            expectEqual(
+                Set(rejected.compactMap(\.rejectReason)),
+                Set(RejectReasonPreset.allCases.map(\.rawValue)))
+        }
+
         await TestKit.shared.run("store: duplicate candidates are rejected at insert") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }
