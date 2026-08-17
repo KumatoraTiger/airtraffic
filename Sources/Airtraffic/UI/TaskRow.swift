@@ -1,52 +1,9 @@
 import AirtrafficCore
 import SwiftUI
 
-struct TasksView: View {
-    @Environment(AppModel.self) private var model
-    @State private var newTitle = ""
-    @State private var showDone = false
-
-    private var visibleTasks: [TaskItem] {
-        showDone ? model.tasks : model.tasks.filter { $0.status != .done }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            List {
-                if visibleTasks.isEmpty {
-                    ContentUnavailableView(
-                        "タスクはまだありません",
-                        systemImage: "checklist",
-                        description: Text("Inbox で候補を承認するか、下の欄から手動で追加します"))
-                }
-                ForEach(visibleTasks) { task in
-                    TaskRow(task: task)
-                }
-                .onMove { indices, offset in
-                    Task { await model.moveTask(fromOffsets: indices, toOffset: offset) }
-                }
-            }
-            Divider()
-            HStack {
-                TextField("タスクを手動で追加…", text: $newTitle)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { submit() }
-                Button("追加") { submit() }
-                    .disabled(newTitle.isEmpty)
-                Toggle("完了も表示", isOn: $showDone)
-                    .toggleStyle(.checkbox)
-            }
-            .padding(10)
-        }
-    }
-
-    private func submit() {
-        let title = newTitle
-        newTitle = ""
-        Task { await model.addManualTask(title: title) }
-    }
-}
-
+/// One persistent task on the board. The leading circle toggles done state,
+/// which is also how a completed task is brought back from the
+/// "recently disappeared" section.
 struct TaskRow: View {
     @Environment(AppModel.self) private var model
     let task: TaskItem

@@ -58,6 +58,7 @@ public actor Store {
             );
             """)
         try Self.migrateCandidateDedupeKey(db)
+        try Self.migrateCandidateClosedAt(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -72,6 +73,16 @@ public actor Store {
                 file_path TEXT PRIMARY KEY,
                 byte_offset INTEGER NOT NULL DEFAULT 0,
                 extracted_offset INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        try db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_labels (
+                session_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                labeled_activity REAL NOT NULL
             );
             """)
     }
@@ -105,6 +116,16 @@ public actor Store {
             """)
         try db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS candidates_dedupe_key ON candidates(dedupe_key)")
+    }
+
+    /// Adds the close timestamp used by the board's "recently disappeared"
+    /// section. Rows closed before the column existed get their creation time
+    /// as the best available estimate.
+    private static func migrateCandidateClosedAt(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(candidates)").map { $0.text("name") }
+        guard !columns.contains("closed_at") else { return }
+        try db.execute("ALTER TABLE candidates ADD COLUMN closed_at REAL")
+        try db.execute("UPDATE candidates SET closed_at = created_at WHERE status != 'pending'")
     }
 
     // MARK: - Cursors
@@ -195,20 +216,35 @@ public actor Store {
         } else {
             rows = try db.query("SELECT * FROM candidates ORDER BY created_at DESC")
         }
-        return rows.map { row in
-            Candidate(
-                id: row.text("id"),
-                title: row.text("title"),
-                detail: row.text("detail"),
-                confidence: row.real("confidence"),
-                sessionId: row.text("session_id"),
-                agent: AgentKind(rawValue: row.text("agent")) ?? .claudeCode,
-                excerpt: row.text("excerpt"),
-                status: CandidateStatus(rawValue: row.text("status")) ?? .pending,
-                createdAt: Date(timeIntervalSince1970: row.real("created_at")),
-                rejectReason: row.textOrNil("reject_reason")
-            )
-        }
+        return rows.map(Self.candidate(from:))
+    }
+
+    /// Candidates that were rejected or expired, newest close first. These feed
+    /// the board's "recently disappeared" section, where any of them can be
+    /// reopened. Kept (accepted) candidates live on as tasks and are excluded.
+    public func closedCandidates(limit: Int = 30) throws -> [Candidate] {
+        let rows = try db.query(
+            """
+            SELECT * FROM candidates WHERE status IN ('rejected', 'expired')
+            ORDER BY closed_at DESC LIMIT ?
+            """, [.int(Int64(limit))])
+        return rows.map(Self.candidate(from:))
+    }
+
+    private static func candidate(from row: [String: SQLiteDatabase.Value]) -> Candidate {
+        Candidate(
+            id: row.text("id"),
+            title: row.text("title"),
+            detail: row.text("detail"),
+            confidence: row.real("confidence"),
+            sessionId: row.text("session_id"),
+            agent: AgentKind(rawValue: row.text("agent")) ?? .claudeCode,
+            excerpt: row.text("excerpt"),
+            status: CandidateStatus(rawValue: row.text("status")) ?? .pending,
+            createdAt: Date(timeIntervalSince1970: row.real("created_at")),
+            rejectReason: row.textOrNil("reject_reason"),
+            closedAt: row.realOrNil("closed_at").map(Date.init(timeIntervalSince1970:))
+        )
     }
 
     /// Inserts a candidate unless one with the same normalized title already
@@ -235,15 +271,31 @@ public actor Store {
         return db.changes > 0
     }
 
-    public func setCandidateStatus(_ id: String, _ status: CandidateStatus, rejectReason: String? = nil) throws {
+    public func setCandidateStatus(
+        _ id: String, _ status: CandidateStatus, rejectReason: String? = nil, now: Date = Date()
+    ) throws {
         try db.execute(
-            "UPDATE candidates SET status = ?, reject_reason = ? WHERE id = ?",
-            [.text(status.rawValue), rejectReason.map { .text($0) } ?? .null, .text(id)])
+            "UPDATE candidates SET status = ?, reject_reason = ?, closed_at = ? WHERE id = ?",
+            [
+                .text(status.rawValue), rejectReason.map { .text($0) } ?? .null,
+                status == .pending ? .null : .real(now.timeIntervalSince1970), .text(id),
+            ])
+    }
+
+    /// Puts a rejected or expired candidate back on the board. The creation
+    /// time is reset so the reopened candidate does not expire again on the
+    /// next sweep.
+    public func reopenCandidate(_ id: String, now: Date = Date()) throws {
+        try db.execute(
+            """
+            UPDATE candidates SET status = 'pending', reject_reason = NULL, closed_at = NULL,
+                created_at = ? WHERE id = ?
+            """, [.real(now.timeIntervalSince1970), .text(id)])
     }
 
     /// Titles of every candidate ever seen, whatever its state. Accepted,
     /// rejected, and expired candidates all belong here: re-proposing something
-    /// the user has already dealt with is exactly what makes the inbox noisy.
+    /// the user has already dealt with is exactly what makes the board noisy.
     public func knownCandidateTitles(limit: Int = 300) throws -> [String] {
         let rows = try db.query(
             "SELECT title FROM candidates ORDER BY created_at DESC LIMIT ?", [.int(Int64(limit))])
@@ -264,8 +316,54 @@ public actor Store {
     public func expireCandidates(olderThan age: TimeInterval, now: Date = Date()) throws {
         let threshold = now.timeIntervalSince1970 - age
         try db.execute(
-            "UPDATE candidates SET status = 'expired' WHERE status = 'pending' AND created_at < ?",
-            [.real(threshold)])
+            """
+            UPDATE candidates SET status = 'expired', closed_at = ?
+            WHERE status = 'pending' AND created_at < ?
+            """,
+            [.real(now.timeIntervalSince1970), .real(threshold)])
+    }
+
+    // MARK: - Work labels
+
+    public func labels() throws -> [String: WorkLabel] {
+        let rows = try db.query("SELECT * FROM session_labels")
+        var labels: [String: WorkLabel] = [:]
+        for row in rows {
+            guard let kind = WorkKind(rawValue: row.text("kind")) else { continue }
+            let sessionId = row.text("session_id")
+            labels[sessionId] = WorkLabel(
+                sessionId: sessionId,
+                kind: kind,
+                subject: row.text("subject"),
+                updatedAt: Date(timeIntervalSince1970: row.real("updated_at")),
+                labeledActivity: Date(timeIntervalSince1970: row.real("labeled_activity"))
+            )
+        }
+        return labels
+    }
+
+    public func upsertLabel(_ label: WorkLabel) throws {
+        try db.execute(
+            """
+            INSERT INTO session_labels (session_id, kind, subject, updated_at, labeled_activity)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                kind = excluded.kind, subject = excluded.subject,
+                updated_at = excluded.updated_at, labeled_activity = excluded.labeled_activity
+            """,
+            [
+                .text(label.sessionId), .text(label.kind.rawValue), .text(label.subject),
+                .real(label.updatedAt.timeIntervalSince1970),
+                .real(label.labeledActivity.timeIntervalSince1970),
+            ])
+    }
+
+    /// Housekeeping only: a label whose session has not moved for this long
+    /// belongs to a transcript the board will never show again.
+    public func pruneLabels(olderThan age: TimeInterval, now: Date = Date()) throws {
+        try db.execute(
+            "DELETE FROM session_labels WHERE labeled_activity < ?",
+            [.real(now.timeIntervalSince1970 - age)])
     }
 
     // MARK: - Preferences

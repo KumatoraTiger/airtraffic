@@ -36,16 +36,18 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        let waiting = model.sessions.filter { $0.status.needsAttention }
+        let waiting = model.attentionEntries
         if waiting.isEmpty {
-            Text("対応待ちのセッションはありません")
+            Text("対応待ちのタスクはありません")
         } else {
             Text("対応待ち \(waiting.count) 件")
             Divider()
-            ForEach(waiting.prefix(8)) { session in
+            ForEach(waiting.prefix(8)) { entry in
+                let kind = entry.label.flatMap { $0.isPlaceholder ? nil : $0.kind }
+                let text = (kind.map { "\($0.displayName): " } ?? "") + entry.title
                 Label(
-                    "[\(session.agent.displayName)] \(session.title.prefix(40))",
-                    systemImage: statusSymbol(session.status))
+                    String(text.prefix(40)),
+                    systemImage: statusSymbol(entry.liveStatus ?? .idle))
             }
         }
         Divider()

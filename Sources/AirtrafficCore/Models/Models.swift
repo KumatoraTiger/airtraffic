@@ -132,7 +132,7 @@ public enum TaskStatus: String, Codable, CaseIterable, Sendable {
 public enum TaskSource: String, Codable, Sendable {
     /// Parsed from a structured signal in the transcript (e.g. TodoWrite).
     case deterministic
-    /// Extracted by an LLM and accepted by the user from the inbox.
+    /// Extracted by an LLM and kept by the user from the board.
     case llm
     /// Created by hand in the app.
     case manual
@@ -166,7 +166,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     }
 }
 
-// MARK: - Candidate (inbox)
+// MARK: - Candidate (board proposal)
 
 public enum CandidateStatus: String, Codable, Sendable {
     case pending
@@ -175,7 +175,7 @@ public enum CandidateStatus: String, Codable, Sendable {
     case expired
 }
 
-/// Frequently used reject reasons, offered as one-click choices in the inbox.
+/// Frequently used reject reasons, offered as one-click choices on proposal rows.
 /// The raw value is stored as the candidate's reject reason and later fed back
 /// into extraction prompts as a negative example, so keep the wording concise
 /// and self-explanatory.
@@ -188,7 +188,7 @@ public enum RejectReasonPreset: String, CaseIterable, Identifiable, Sendable {
 
     public var id: String { rawValue }
 
-    /// Button label shown in the inbox menu.
+    /// Button label shown in the reject menu.
     public var label: String { rawValue }
 
     public var symbol: String {
@@ -202,7 +202,9 @@ public enum RejectReasonPreset: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// An LLM-extracted task candidate. Lives in the inbox until the user accepts or rejects it.
+/// An LLM-extracted task candidate. Appears on the board as a proposal the
+/// moment it is extracted; the user may keep it as a task or reject it, and
+/// untouched proposals expire on their own. Closed proposals stay revertable.
 public struct Candidate: Identifiable, Hashable, Sendable {
     public var id: String
     public var title: String
@@ -214,11 +216,13 @@ public struct Candidate: Identifiable, Hashable, Sendable {
     public var status: CandidateStatus
     public var createdAt: Date
     public var rejectReason: String?
+    /// When the candidate left the pending state (rejected, expired, or kept).
+    public var closedAt: Date?
 
     public init(
         id: String, title: String, detail: String, confidence: Double, sessionId: String,
         agent: AgentKind, excerpt: String, status: CandidateStatus, createdAt: Date,
-        rejectReason: String?
+        rejectReason: String?, closedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -230,6 +234,7 @@ public struct Candidate: Identifiable, Hashable, Sendable {
         self.status = status
         self.createdAt = createdAt
         self.rejectReason = rejectReason
+        self.closedAt = closedAt
     }
 }
 

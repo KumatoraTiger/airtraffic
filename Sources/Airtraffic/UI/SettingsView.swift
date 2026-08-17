@@ -18,11 +18,13 @@ struct SettingsView: View {
             ForEach(ProviderKind.allCases) { kind in
                 ProviderSettingsSection(kind: kind)
             }
-            Section("タスク起票") {
-                Toggle("セッションの新着ログから LLM でタスク候補を抽出する", isOn: $model.extractionEnabled)
-                Text("抽出結果は Inbox に候補として入り、承認するまでタスクになりません。約60秒ごとに新着分だけを処理します。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Section("LLM 連携") {
+                Toggle("新着ログから LLM でタスク候補の抽出と作業ラベルの生成を行う", isOn: $model.extractionEnabled)
+                Text(
+                    "抽出結果は管制ボードに提案として表示されます。「残す」でタスクになり、放置すれば72時間で自動的に消えます（消えたものは戻せます）。作業ラベルは各セッションが何の作業か（レビュー・設計など）を行に表示するもので、動きのあるセッションだけ更新されます。どちらも約60秒ごとの処理です。"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Section("学習した優先順位の傾向") {
                 if model.preferences.isEmpty {

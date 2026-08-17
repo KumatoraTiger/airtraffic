@@ -2,19 +2,27 @@ import Foundation
 
 /// Extracts task candidates from new transcript text via an LLM.
 ///
-/// False-positive strategy: results are inserted as inbox *candidates*, never
-/// as tasks. The prompt carries what is already known — tasks, pending
-/// candidates, and previously rejected titles, each in its own section — and a
-/// confidence threshold drops the weakest extractions. Whatever the LLM still
-/// returns as a duplicate is then filtered by `TitleMatcher`.
+/// False-positive strategy: results are inserted as board *proposals*, never
+/// as tasks — a wrong proposal costs nothing because it expires on its own.
+/// The prompt carries what is already known — tasks, open proposals, and
+/// previously rejected titles, each in its own section — and a confidence
+/// threshold drops the weakest extractions. Whatever the LLM still returns as
+/// a duplicate is then filtered by `TitleMatcher`.
 public struct TaskExtractor: Sendable {
     public var confidenceThreshold: Double
     /// Cap on transcript characters per extraction call.
     public var maxChunkLength: Int
+    /// Cap on proposals per extraction call. The board is a priority list,
+    /// not a backlog dump: a pass that finds ten things keeps the three it
+    /// is most sure about and drops the rest.
+    public var maxPerPass: Int
 
-    public init(confidenceThreshold: Double = 0.4, maxChunkLength: Int = 12000) {
+    public init(
+        confidenceThreshold: Double = 0.6, maxChunkLength: Int = 12000, maxPerPass: Int = 3
+    ) {
         self.confidenceThreshold = confidenceThreshold
         self.maxChunkLength = maxChunkLength
+        self.maxPerPass = maxPerPass
     }
 
     public struct Extraction: Sendable {
@@ -27,13 +35,13 @@ public struct TaskExtractor: Sendable {
     /// Everything the extractor already knows about, split by how it is used.
     ///
     /// The first three groups get their own section in the prompt with its own
-    /// budget, so a long task list can no longer crowd the inbox out of the
-    /// prompt entirely. Every group, including `otherSeen`, feeds the
+    /// budget, so a long task list can no longer crowd the open proposals out
+    /// of the prompt entirely. Every group, including `otherSeen`, feeds the
     /// deterministic filter that runs on the response.
     public struct KnownTitles: Sendable {
         /// Existing tasks, most relevant first.
         public var tasks: [String]
-        /// Candidates still waiting in the inbox.
+        /// Proposals still open on the board.
         public var pendingCandidates: [String]
         /// Candidates the user rejected before; shown as negative examples.
         public var rejected: [String]
@@ -77,8 +85,14 @@ public struct TaskExtractor: Sendable {
             - 一般論や仮定の話
             - 既存タスクや未処理の候補にあるものと実質同じもの（言い回しが違っていても同じ作業なら抽出しない）
 
+            粒度の指針:
+            - 1件は「独立して着手でき、30分〜数時間かかる作業」とする
+            - 手順やチェックリストの1項目、数分で済む微修正は抽出しない
+            - 同じ目的に属する細かい作業は、まとめて1件にする
+
             出力は次の JSON のみ: {"candidates": [{"title": "簡潔な日本語タイトル", "detail": "背景を1-2文", "confidence": 0.0-1.0, "excerpt": "根拠となるログの短い引用"}]}
-            該当がなければ {"candidates": []} を返す。確信が持てないものは confidence を低くする。
+            1回の応答は最大3件。確信の高いものだけに絞り、該当がなければ {"candidates": []} を返す。
+            確信が持てないものは confidence を低くする。
             """
 
         var prompt = "# セッション: \(sessionTitle)\n\n"
@@ -126,7 +140,7 @@ public struct TaskExtractor: Sendable {
             seen.append(extraction.title)
             accepted.append(extraction)
         }
-        return accepted
+        return Array(accepted.sorted { $0.confidence > $1.confidence }.prefix(maxPerPass))
     }
 
     /// One titled bullet list, or nothing when the group is empty.

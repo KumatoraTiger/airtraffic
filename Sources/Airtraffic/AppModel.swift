@@ -18,7 +18,11 @@ final class AppModel {
 
     var sessions: [SessionSnapshot] = []
     var tasks: [TaskItem] = []
+    /// LLM-generated work labels ("レビュー: …") by session id.
+    var labels: [String: WorkLabel] = [:]
     var candidates: [Candidate] = []
+    /// Recently rejected or expired proposals, revertable from the board.
+    var closedCandidates: [Candidate] = []
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
@@ -37,18 +41,32 @@ final class AppModel {
         }
     }
 
-    var attentionCount: Int { sessions.filter { $0.status.needsAttention }.count }
+    /// Entries the user can still usefully act on — same recency rule as the
+    /// board's 要対応 section, so every badge agrees with what the board shows.
+    var attentionEntries: [BoardEntry] { boardEntries.filter { $0.needsAttention() } }
+    var attentionCount: Int { attentionEntries.count }
+
+    /// Unified board rows: tasks with their live executions attached, plus
+    /// session activity that matches no task, materialized as its own rows.
+    /// Done tasks stay out; they only appear in the "recently disappeared"
+    /// section, straight from `tasks`.
+    var boardEntries: [BoardEntry] {
+        BoardAssembler.assemble(
+            tasks: tasks.filter { $0.status != .done }, sessions: sessions, labels: labels)
+    }
 
     // MARK: - Internals
 
     private let store: Store?
     private let coordinator: IngestionCoordinator
     private let extractor = TaskExtractor()
+    private let labeler = SessionLabeler()
     private let prioritizer = Prioritizer()
     /// Transcript text accumulated per session since the last extraction pass.
     private var pendingText: [String: (title: String, agent: AgentKind, text: String)] = [:]
     private var scanTask: Task<Void, Never>?
     private var lastExtraction = Date.distantPast
+    private var lastExpiry = Date.distantPast
 
     init() {
         extractionEnabled = UserDefaults.standard.object(forKey: "extractionEnabled") as? Bool ?? false
@@ -93,15 +111,29 @@ final class AppModel {
         if extractionEnabled, Date().timeIntervalSince(lastExtraction) > 60 {
             lastExtraction = Date()
             await runExtractionPass()
+            await runLabelPass()
+        }
+        // Untouched proposals leave the board on their own; sweep periodically
+        // so this happens while the app stays open, not only at launch.
+        if Date().timeIntervalSince(lastExpiry) > 900 {
+            lastExpiry = Date()
+            if let store {
+                try? await store.expireCandidates(olderThan: 72 * 3600)
+                candidates = (try? await store.candidates()) ?? []
+                closedCandidates = (try? await store.closedCandidates()) ?? []
+            }
         }
     }
 
     private func refreshFromStore() async {
         guard let store else { return }
+        try? await store.expireCandidates(olderThan: 72 * 3600)
+        try? await store.pruneLabels(olderThan: 30 * 24 * 3600)
+        labels = (try? await store.labels()) ?? [:]
         tasks = (try? await store.tasks()) ?? []
         candidates = (try? await store.candidates()) ?? []
+        closedCandidates = (try? await store.closedCandidates()) ?? []
         preferences = (try? await store.preferences()) ?? []
-        try? await store.expireCandidates(olderThan: 72 * 3600)
     }
 
     // MARK: - LLM plumbing
@@ -132,7 +164,7 @@ final class AppModel {
         }
     }
 
-    // MARK: - Extraction (inbox candidates)
+    // MARK: - Extraction (board proposals)
 
     private func runExtractionPass() async {
         guard let store, let client = try? makeClient() else { return }
@@ -174,9 +206,35 @@ final class AppModel {
         candidates = (try? await store.candidates()) ?? []
     }
 
-    // MARK: - Inbox actions
+    /// Labels sessions whose work label is missing or stale, a bounded batch
+    /// per pass. Failures cost nothing: unlabeled rows keep their fallback
+    /// titles and the next pass tries again.
+    private func runLabelPass() async {
+        guard let store, let client = try? makeClient() else { return }
+        let targets = labeler.sessionsNeedingLabels(sessions, labels: labels)
+        guard !targets.isEmpty,
+            let fresh = try? await labeler.label(client: client, sessions: targets)
+        else { return }
+        for label in fresh {
+            try? await store.upsertLabel(label)
+        }
+        // Sessions the LLM saw but could not classify get a placeholder, so
+        // the next pass spends its budget on new sessions instead of them.
+        let labeled = Set(fresh.map(\.sessionId))
+        for session in targets where !labeled.contains(session.id) {
+            try? await store.upsertLabel(
+                WorkLabel(
+                    sessionId: session.id, kind: .other, subject: "",
+                    updatedAt: Date(), labeledActivity: session.lastActivity))
+        }
+        labels = (try? await store.labels()) ?? labels
+    }
 
-    func accept(_ candidate: Candidate) async {
+    // MARK: - Proposal actions
+
+    /// Keeps a proposal as a persistent task. Nothing requires this: proposals
+    /// left alone simply expire off the board.
+    func keep(_ candidate: Candidate) async {
         guard let store else { return }
         let task = TaskItem(
             id: UUID().uuidString, title: candidate.title, detail: candidate.detail,
@@ -190,6 +248,13 @@ final class AppModel {
     func reject(_ candidate: Candidate, reason: String?) async {
         guard let store else { return }
         try? await store.setCandidateStatus(candidate.id, .rejected, rejectReason: reason)
+        await refreshLists()
+    }
+
+    /// Brings a rejected or expired proposal back onto the board.
+    func reopen(_ candidate: Candidate) async {
+        guard let store else { return }
+        try? await store.reopenCandidate(candidate.id)
         await refreshLists()
     }
 
@@ -213,6 +278,20 @@ final class AppModel {
         await refreshLists()
     }
 
+    /// Persists an auto-materialized entry as a task, so it survives its
+    /// sessions going quiet. Also the way a stopped entry is brought back
+    /// from the "recently disappeared" section.
+    func keepEntry(_ entry: BoardEntry) async {
+        guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
+        let task = TaskItem(
+            id: UUID().uuidString, title: entry.title, detail: "",
+            status: entry.isLive ? .inProgress : .todo, rank: nil,
+            source: .deterministic, createdAt: Date(), updatedAt: Date(),
+            sessionIds: entry.sessions.map(\.id))
+        try? await store.upsertTask(task)
+        await refreshLists()
+    }
+
     /// Promote a session's in-transcript todo into a global task.
     func promoteTodo(_ todo: TodoItem, from session: SessionSnapshot) async {
         guard let store else { return }
@@ -226,15 +305,18 @@ final class AppModel {
         await refreshLists()
     }
 
-    /// Manual reorder. The move itself is recorded as a preference so future
+    /// Manual reorder of the tasks visible in one list. Offsets are relative
+    /// to `visibleIds` (the list the user actually dragged in), not to the
+    /// full task array. The move itself is recorded as a preference so future
     /// AI proposals learn from it.
-    func moveTask(fromOffsets: IndexSet, toOffset: Int) async {
+    func moveTask(in visibleIds: [String], fromOffsets: IndexSet, toOffset: Int) async {
         guard let store else { return }
-        var reordered = tasks
+        var reordered = visibleIds
         reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
-        try? await store.setRanks(reordered.map(\.id))
-        if let index = fromOffsets.first, index < tasks.count {
-            let moved = tasks[index]
+        try? await store.setRanks(reordered)
+        if let index = fromOffsets.first, index < visibleIds.count,
+            let moved = tasks.first(where: { $0.id == visibleIds[index] })
+        {
             let direction = toOffset <= index ? "上げた" : "下げた"
             try? await store.insertPreference(
                 "ユーザーは「\(moved.title)」の優先度を手動で\(direction)")
@@ -246,6 +328,7 @@ final class AppModel {
         guard let store else { return }
         tasks = (try? await store.tasks()) ?? []
         candidates = (try? await store.candidates()) ?? []
+        closedCandidates = (try? await store.closedCandidates()) ?? []
         preferences = (try? await store.preferences()) ?? []
     }
 

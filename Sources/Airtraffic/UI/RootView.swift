@@ -2,36 +2,30 @@ import AirtrafficCore
 import SwiftUI
 
 enum Lane: String, CaseIterable, Identifiable {
-    case sessions
-    case tasks
-    case inbox
+    /// The unified board: sessions grouped by project, AI proposals inline,
+    /// pinned tasks, and a revertable trail of recently disappeared items.
+    case board
     case chat
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .sessions: "管制"
-        case .tasks: "タスク"
-        case .inbox: "Inbox"
+        case .board: "管制"
         case .chat: "壁打ち"
         }
     }
 
     var symbol: String {
         switch self {
-        case .sessions: "airplane"
-        case .tasks: "checklist"
-        case .inbox: "tray"
+        case .board: "airplane"
         case .chat: "bubble.left.and.bubble.right"
         }
     }
 
     var minWidth: CGFloat {
         switch self {
-        case .sessions: 280
-        case .tasks: 260
-        case .inbox: 260
+        case .board: 340
         case .chat: 300
         }
     }
@@ -40,9 +34,7 @@ enum Lane: String, CaseIterable, Identifiable {
     /// visually separable.
     var tint: Color {
         switch self {
-        case .sessions: .orange
-        case .tasks: .blue
-        case .inbox: .purple
+        case .board: .orange
         case .chat: .teal
         }
     }
@@ -54,7 +46,7 @@ enum Lane: String, CaseIterable, Identifiable {
 struct LaneLayout: Equatable {
     var columns: [[Lane]]
 
-    static let initial = LaneLayout(columns: [[.sessions], [.tasks, .inbox], [.chat]])
+    static let initial = LaneLayout(columns: [[.board], [.chat]])
 
     var openLanes: [Lane] { columns.flatMap { $0 } }
 
@@ -161,7 +153,9 @@ struct RootView: View {
     @State private var layout: LaneLayout = RootView.restoreLayout()
     @State private var showSettings = false
 
-    private static let layoutKey = "laneLayout"
+    // v2: the sessions/tasks/inbox lanes merged into the board lane. A new key
+    // (rather than migrating the old string) so downgrades keep their layout.
+    private static let layoutKey = "laneLayout.v2"
 
     var body: some View {
         Group {
@@ -244,14 +238,13 @@ struct RootView: View {
 
     private func badgeCount(for lane: Lane) -> Int? {
         switch lane {
-        case .sessions: model.attentionCount
-        case .inbox: model.candidates.count
+        case .board: model.attentionCount
         default: nil
         }
     }
 
     private func badgeColor(for lane: Lane) -> Color {
-        lane == .sessions ? .orange : .purple
+        .orange
     }
 
     private func shortcutNumber(for lane: Lane) -> Int {
@@ -348,13 +341,13 @@ private struct LaneColumn: View {
 
     @ViewBuilder
     private var headerBadge: some View {
-        switch lane {
-        case .sessions where model.attentionCount > 0:
-            countBadge(model.attentionCount, color: .orange)
-        case .inbox where !model.candidates.isEmpty:
-            countBadge(model.candidates.count, color: .purple)
-        default:
-            EmptyView()
+        if lane == .board {
+            if model.attentionCount > 0 {
+                countBadge(model.attentionCount, color: .orange)
+            }
+            if !model.candidates.isEmpty {
+                countBadge(model.candidates.count, color: .purple)
+            }
         }
     }
 
@@ -370,9 +363,7 @@ private struct LaneColumn: View {
     @ViewBuilder
     private var content: some View {
         switch lane {
-        case .sessions: SessionsView()
-        case .tasks: TasksView()
-        case .inbox: InboxView()
+        case .board: BoardView()
         case .chat: ChatView()
         }
     }

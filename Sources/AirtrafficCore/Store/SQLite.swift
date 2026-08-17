@@ -131,4 +131,12 @@ extension [String: SQLiteDatabase.Value] {
         default: return 0
         }
     }
+
+    func realOrNil(_ key: String) -> Double? {
+        switch self[key] {
+        case .real(let value)?: return value
+        case .int(let value)?: return Double(value)
+        default: return nil
+        }
+    }
 }
