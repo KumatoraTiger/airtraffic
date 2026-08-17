@@ -160,25 +160,24 @@ struct RootView: View {
                     systemImage: "rectangle.split.3x1",
                     description: Text("ツールバーのボタンからレーンを開きます"))
             } else {
-                HStack(spacing: 0) {
+                HSplitView {
                     ForEach(layout.columns.indices, id: \.self) { c in
-                        VStack(spacing: 0) {
+                        VSplitView {
                             ForEach(layout.columns[c]) { lane in
                                 LaneColumn(
                                     lane: lane,
                                     layout: layout,
-                                    mutate: { mutation in mutateLayout(mutation) })
-                                if lane != layout.columns[c].last {
-                                    Divider()
-                                }
+                                    mutate: { mutation in mutateLayout(mutation) }
+                                )
+                                .frame(minHeight: 140, maxHeight: .infinity)
+                                .layoutPriority(1)
                             }
                         }
                         .frame(
                             minWidth: layout.columns[c].map(\.minWidth).max() ?? 240,
-                            maxWidth: .infinity, maxHeight: .infinity)
-                        if c != layout.columns.indices.last {
-                            Divider()
-                        }
+                            maxWidth: .infinity, maxHeight: .infinity
+                        )
+                        .layoutPriority(1)
                     }
                 }
             }
