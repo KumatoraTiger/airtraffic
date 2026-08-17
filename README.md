@@ -44,6 +44,17 @@ make bundle
 open dist/Airtraffic.app
 ```
 
+`dist/` is a build directory that `make clean` wipes, so to keep the app around
+— and reachable from Launchpad and Spotlight — copy it out once:
+
+```bash
+cp -R dist/Airtraffic.app /Applications/
+```
+
+Tasks and candidates live in `~/Library/Application Support/Airtraffic`, and API
+keys in the Keychain — neither is inside the bundle, so replacing the app on a
+later `make bundle` keeps your data.
+
 Or during development:
 
 ```bash
