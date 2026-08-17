@@ -6,6 +6,7 @@ Task {
     let adapterTests = AdapterTests()
     await adapterTests.runAll()
     await StoreTests().runAll()
+    await ServiceTests().runAll()
     semaphore.signal()
 }
 semaphore.wait()
