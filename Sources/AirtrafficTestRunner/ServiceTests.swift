@@ -10,6 +10,29 @@ struct MockLLMClient: LLMClient {
     func complete(_ request: LLMRequest) async throws -> String { response }
 }
 
+/// Records the prompt it was given, so tests can assert on what the LLM sees.
+final class RecordingLLMClient: LLMClient, @unchecked Sendable {
+    let kind: ProviderKind = .gemini
+    let response: String
+    private let lock = NSLock()
+    private var recorded = ""
+
+    init(response: String) { self.response = response }
+
+    var prompt: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func complete(_ request: LLMRequest) async throws -> String {
+        lock.lock()
+        recorded = request.messages.map(\.text).joined(separator: "\n")
+        lock.unlock()
+        return response
+    }
+}
+
 struct ServiceTests {
     func runAll() async {
         await TestKit.shared.run("extractor: parses candidates and applies threshold") {
@@ -23,7 +46,7 @@ struct ServiceTests {
             let extractor = TaskExtractor(confidenceThreshold: 0.4)
             let results = try await extractor.extract(
                 client: mock, newText: "[user] READMEも直さないと\n",
-                sessionTitle: "demo", existingTitles: [], rejectedTitles: [])
+                sessionTitle: "demo", known: .init())
             expectEqual(results.count, 1)
             expectEqual(results.first?.title, "READMEを更新する")
         }
@@ -36,7 +59,7 @@ struct ServiceTests {
             let extractor = TaskExtractor()
             let results = try await extractor.extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: ["README を更新する"], rejectedTitles: [])
+                known: .init(tasks: ["README を更新する"]))
             expect(results.isEmpty, "similar title should be deduped")
         }
 
@@ -47,7 +70,7 @@ struct ServiceTests {
                     """)
             let results = try await TaskExtractor().extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: ["READMEを更新する"], rejectedTitles: [])
+                known: .init(tasks: ["READMEを更新する"]))
             expect(results.isEmpty, "paraphrased title should be deduped")
         }
 
@@ -58,7 +81,7 @@ struct ServiceTests {
                     """)
             let results = try await TaskExtractor().extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: ["テストを修正"], rejectedTitles: [])
+                known: .init(tasks: ["テストを修正"]))
             expectEqual(results.count, 1)
         }
 
@@ -69,7 +92,7 @@ struct ServiceTests {
                     """)
             let results = try await TaskExtractor().extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: [], rejectedTitles: ["README を更新する"])
+                known: .init(rejected: ["README を更新する"]))
             expect(results.isEmpty, "rejected title should not come back")
         }
 
@@ -83,9 +106,24 @@ struct ServiceTests {
                     """)
             let results = try await TaskExtractor().extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: [], rejectedTitles: [])
+                known: .init())
             expectEqual(results.count, 1)
             expectEqual(results.first?.title, "READMEを更新する")
+        }
+
+        await TestKit.shared.run("extractor: a long task list never crowds out the inbox") {
+            let mock = RecordingLLMClient(response: #"{"candidates": []}"#)
+            _ = try await TaskExtractor().extract(
+                client: mock, newText: "[user] x\n", sessionTitle: "demo",
+                known: .init(
+                    tasks: (1...50).map { "タスク\($0)" },
+                    pendingCandidates: ["認証まわりをリファクタする"],
+                    rejected: ["却下されたもの"]))
+            expect(
+                mock.prompt.contains("認証まわりをリファクタする"),
+                "pending candidates get their own budget, so tasks cannot push them out")
+            expect(mock.prompt.contains("却下されたもの"), "rejected titles survive too")
+            expect(!mock.prompt.contains("タスク50"), "the task list is still capped")
         }
 
         await TestKit.shared.run("matcher: normalizes width, case, and punctuation") {
@@ -109,7 +147,7 @@ struct ServiceTests {
             let extractor = TaskExtractor()
             let results = try await extractor.extract(
                 client: mock, newText: "[user] x\n", sessionTitle: "demo",
-                existingTitles: [], rejectedTitles: [])
+                known: .init())
             expectEqual(results.count, 1)
         }
 
