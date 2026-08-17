@@ -40,6 +40,64 @@ struct ServiceTests {
             expect(results.isEmpty, "similar title should be deduped")
         }
 
+        await TestKit.shared.run("extractor: drops paraphrases of existing tasks") {
+            let mock = MockLLMClient(
+                response: """
+                    {"candidates": [{"title": "READMEの記述を更新する", "detail": "", "confidence": 0.9, "excerpt": ""}]}
+                    """)
+            let results = try await TaskExtractor().extract(
+                client: mock, newText: "[user] x\n", sessionTitle: "demo",
+                existingTitles: ["READMEを更新する"], rejectedTitles: [])
+            expect(results.isEmpty, "paraphrased title should be deduped")
+        }
+
+        await TestKit.shared.run("extractor: keeps titles that only look alike") {
+            let mock = MockLLMClient(
+                response: """
+                    {"candidates": [{"title": "テストを追加", "detail": "", "confidence": 0.9, "excerpt": ""}]}
+                    """)
+            let results = try await TaskExtractor().extract(
+                client: mock, newText: "[user] x\n", sessionTitle: "demo",
+                existingTitles: ["テストを修正"], rejectedTitles: [])
+            expectEqual(results.count, 1)
+        }
+
+        await TestKit.shared.run("extractor: drops repeats of rejected candidates") {
+            let mock = MockLLMClient(
+                response: """
+                    {"candidates": [{"title": "READMEを更新する", "detail": "", "confidence": 0.9, "excerpt": ""}]}
+                    """)
+            let results = try await TaskExtractor().extract(
+                client: mock, newText: "[user] x\n", sessionTitle: "demo",
+                existingTitles: [], rejectedTitles: ["README を更新する"])
+            expect(results.isEmpty, "rejected title should not come back")
+        }
+
+        await TestKit.shared.run("extractor: dedupes within a single response") {
+            let mock = MockLLMClient(
+                response: """
+                    {"candidates": [
+                        {"title": "READMEを更新する", "detail": "", "confidence": 0.9, "excerpt": ""},
+                        {"title": "README を更新する", "detail": "", "confidence": 0.8, "excerpt": ""}
+                    ]}
+                    """)
+            let results = try await TaskExtractor().extract(
+                client: mock, newText: "[user] x\n", sessionTitle: "demo",
+                existingTitles: [], rejectedTitles: [])
+            expectEqual(results.count, 1)
+            expectEqual(results.first?.title, "READMEを更新する")
+        }
+
+        await TestKit.shared.run("matcher: normalizes width, case, and punctuation") {
+            expectEqual(TitleMatcher.key("ＲＥＡＤＭＥ を更新する！"), "readmeを更新する")
+            expect(
+                TitleMatcher.isSimilar("CIを直す", "ＣＩ を直す"),
+                "width and spacing differences should not create a new candidate")
+            expect(
+                !TitleMatcher.isSimilar("認証まわりのリファクタ", "ログ出力を整理する"),
+                "unrelated titles should stay distinct")
+        }
+
         await TestKit.shared.run("extractor: tolerates markdown-fenced JSON") {
             let mock = MockLLMClient(
                 response: """

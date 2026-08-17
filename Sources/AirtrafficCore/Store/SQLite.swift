@@ -52,6 +52,9 @@ final class SQLiteDatabase {
         }
     }
 
+    /// Rows changed by the most recent `execute`. Zero after an ignored insert.
+    var changes: Int { Int(sqlite3_changes(handle)) }
+
     func query(_ sql: String, _ params: [Value] = []) throws -> [[String: Value]] {
         let statement = try prepare(sql, params)
         defer { sqlite3_finalize(statement) }

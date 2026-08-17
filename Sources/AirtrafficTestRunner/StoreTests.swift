@@ -55,6 +55,29 @@ struct StoreTests {
             expectEqual(try await store.rejectedTitles(), ["update readme"])
         }
 
+        await TestKit.shared.run("store: duplicate candidates are rejected at insert") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            func candidate(_ id: String, _ title: String) -> Candidate {
+                Candidate(
+                    id: id, title: title, detail: "", confidence: 0.7, sessionId: "claude:s-\(id)",
+                    agent: .claudeCode, excerpt: "", status: .pending, createdAt: Date(),
+                    rejectReason: nil)
+            }
+            expect(try await store.insertCandidate(candidate("c-1", "READMEを更新する")), "first insert")
+            expect(
+                try await store.insertCandidate(candidate("c-2", "README を更新する")) == false,
+                "same title from another session should be dropped")
+            expectEqual(try await store.candidates().count, 1)
+
+            // A candidate the user rejected must not reappear either.
+            try await store.setCandidateStatus("c-1", .rejected, rejectReason: nil)
+            expect(
+                try await store.insertCandidate(candidate("c-3", "READMEを更新する")) == false,
+                "rejected title should stay out of the inbox")
+            expectEqual(try await store.knownCandidateTitles(), ["READMEを更新する"])
+        }
+
         await TestKit.shared.run("store: candidate expiry") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

@@ -138,14 +138,18 @@ final class AppModel {
         guard let store, let client = try? makeClient() else { return }
         let pending = pendingText
         pendingText = [:]
-        let existingTitles = tasks.map(\.title) + candidates.map(\.title)
+        // Archived tasks and already-handled candidates count as known: the
+        // point is to never surface something the user has seen before.
+        var knownTitles =
+            ((try? await store.tasks(includeArchived: true)) ?? []).map(\.title)
+            + ((try? await store.knownCandidateTitles()) ?? [])
         let rejected = (try? await store.rejectedTitles()) ?? []
 
         for (sessionId, entry) in pending {
             guard
                 let extractions = try? await extractor.extract(
                     client: client, newText: entry.text, sessionTitle: entry.title,
-                    existingTitles: existingTitles, rejectedTitles: rejected
+                    existingTitles: knownTitles, rejectedTitles: rejected
                 )
             else { continue }
             for extraction in extractions {
@@ -162,6 +166,8 @@ final class AppModel {
                     rejectReason: nil
                 )
                 try? await store.insertCandidate(candidate)
+                // Sessions later in this pass compare against it too.
+                knownTitles.append(extraction.title)
             }
         }
         candidates = (try? await store.candidates()) ?? []

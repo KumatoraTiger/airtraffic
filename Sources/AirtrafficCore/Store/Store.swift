@@ -53,9 +53,11 @@ public actor Store {
                 excerpt TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at REAL NOT NULL,
-                reject_reason TEXT
+                reject_reason TEXT,
+                dedupe_key TEXT NOT NULL DEFAULT ''
             );
             """)
+        try Self.migrateCandidateDedupeKey(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -72,6 +74,37 @@ public actor Store {
                 extracted_offset INTEGER NOT NULL DEFAULT 0
             );
             """)
+    }
+
+    /// Brings a pre-dedupe database up to date: adds the key column, backfills
+    /// it, collapses rows that were already inserted as duplicates, and locks
+    /// the column down with a unique index so no duplicate can be inserted again.
+    private static func migrateCandidateDedupeKey(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(candidates)").map { $0.text("name") }
+        if !columns.contains("dedupe_key") {
+            try db.execute("ALTER TABLE candidates ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''")
+        }
+        // Backfilled in Swift, not SQL, so the key always matches TitleMatcher.
+        for row in try db.query("SELECT id, title FROM candidates WHERE dedupe_key = ''") {
+            try db.execute(
+                "UPDATE candidates SET dedupe_key = ? WHERE id = ?",
+                [.text(TitleMatcher.key(row.text("title"))), .text(row.text("id"))])
+        }
+        // One row survives per key: a row the user already acted on wins over a
+        // pending one, and the oldest wins among equals.
+        try db.execute(
+            """
+            DELETE FROM candidates WHERE rowid NOT IN (
+                SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY dedupe_key
+                        ORDER BY (status = 'pending') ASC, created_at ASC
+                    ) AS position FROM candidates
+                ) WHERE position = 1
+            )
+            """)
+        try db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS candidates_dedupe_key ON candidates(dedupe_key)")
     }
 
     // MARK: - Cursors
@@ -178,12 +211,18 @@ public actor Store {
         }
     }
 
-    public func insertCandidate(_ candidate: Candidate) throws {
+    /// Inserts a candidate unless one with the same normalized title already
+    /// exists in any state. Returns false when the insert was dropped as a
+    /// duplicate — this is the last line of defense behind the extractor's own
+    /// fuzzy filter, and the only one that survives an app restart.
+    @discardableResult
+    public func insertCandidate(_ candidate: Candidate) throws -> Bool {
         try db.execute(
             """
             INSERT OR IGNORE INTO candidates
-                (id, title, detail, confidence, session_id, agent, excerpt, status, created_at, reject_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, title, detail, confidence, session_id, agent, excerpt, status, created_at,
+                 reject_reason, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 .text(candidate.id), .text(candidate.title), .text(candidate.detail),
@@ -191,13 +230,24 @@ public actor Store {
                 .text(candidate.excerpt), .text(candidate.status.rawValue),
                 .real(candidate.createdAt.timeIntervalSince1970),
                 candidate.rejectReason.map { .text($0) } ?? .null,
+                .text(TitleMatcher.key(candidate.title)),
             ])
+        return db.changes > 0
     }
 
     public func setCandidateStatus(_ id: String, _ status: CandidateStatus, rejectReason: String? = nil) throws {
         try db.execute(
             "UPDATE candidates SET status = ?, reject_reason = ? WHERE id = ?",
             [.text(status.rawValue), rejectReason.map { .text($0) } ?? .null, .text(id)])
+    }
+
+    /// Titles of every candidate ever seen, whatever its state. Accepted,
+    /// rejected, and expired candidates all belong here: re-proposing something
+    /// the user has already dealt with is exactly what makes the inbox noisy.
+    public func knownCandidateTitles(limit: Int = 300) throws -> [String] {
+        let rows = try db.query(
+            "SELECT title FROM candidates ORDER BY created_at DESC LIMIT ?", [.int(Int64(limit))])
+        return rows.map { $0.text("title") }
     }
 
     /// Titles the user has rejected before; used as negative examples in extraction prompts.

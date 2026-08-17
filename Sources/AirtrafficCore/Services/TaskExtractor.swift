@@ -77,7 +77,7 @@ public struct TaskExtractor: Sendable {
             let raw = json["candidates"] as? [[String: Any]]
         else { return [] }
 
-        return raw.compactMap { item in
+        let parsed = raw.compactMap { item -> Extraction? in
             guard let title = item["title"] as? String, !title.isEmpty else { return nil }
             let confidence =
                 (item["confidence"] as? Double)
@@ -90,21 +90,19 @@ public struct TaskExtractor: Sendable {
                 excerpt: item["excerpt"] as? String ?? ""
             )
         }
-        .filter { extraction in
-            // Cheap dedupe on top of the prompt-level instruction.
-            !existingTitles.contains { isSimilar($0, extraction.title) }
+
+        // Deterministic dedupe on top of the prompt-level instruction. Titles
+        // already accepted grow the comparison set, so one response cannot
+        // return the same task twice under two phrasings either.
+        var seen = existingTitles + rejectedTitles
+        var accepted: [Extraction] = []
+        for extraction in parsed {
+            guard !seen.contains(where: { TitleMatcher.isSimilar($0, extraction.title) }) else {
+                continue
+            }
+            seen.append(extraction.title)
+            accepted.append(extraction)
         }
-    }
-
-    /// Loose similarity: normalized containment either way.
-    func isSimilar(_ a: String, _ b: String) -> Bool {
-        let na = normalize(a)
-        let nb = normalize(b)
-        guard !na.isEmpty, !nb.isEmpty else { return false }
-        return na.contains(nb) || nb.contains(na)
-    }
-
-    private func normalize(_ s: String) -> String {
-        s.lowercased().filter { !$0.isWhitespace && !$0.isPunctuation }
+        return accepted
     }
 }
