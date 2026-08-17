@@ -27,27 +27,33 @@ public final class ClaudeCodeAdapter: AgentAdapter {
     }
 
     public init(root: URL? = nil, config: ScanConfig = .default) {
-        self.root = root ?? FileManager.default.homeDirectoryForCurrentUser
+        self.root =
+            root
+            ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects")
         self.config = config
     }
 
     public func scan(now: Date) throws -> [SessionSnapshot] {
         let fileManager = FileManager.default
-        guard let projectDirs = try? fileManager.contentsOfDirectory(
-            at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
-        ) else { return [] }
+        guard
+            let projectDirs = try? fileManager.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+            )
+        else { return [] }
 
         var snapshots: [SessionSnapshot] = []
         for projectDir in projectDirs {
-            let files = (try? fileManager.contentsOfDirectory(
-                at: projectDir,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: .skipsHiddenFiles
-            )) ?? []
+            let files =
+                (try? fileManager.contentsOfDirectory(
+                    at: projectDir,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: .skipsHiddenFiles
+                )) ?? []
             for file in files where file.pathExtension == "jsonl" {
-                guard let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate,
+                guard
+                    let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                        .contentModificationDate,
                     now.timeIntervalSince(mtime) < config.lookback
                 else { continue }
                 if let snapshot = try? scanFile(file, mtime: mtime, now: now) {
@@ -126,7 +132,8 @@ public final class ClaudeCodeAdapter: AgentAdapter {
             }
         case "assistant":
             guard let message = object["message"] as? [String: Any],
-                  let blocks = message["content"] as? [[String: Any]] else { return }
+                let blocks = message["content"] as? [[String: Any]]
+            else { return }
             var texts: [String] = []
             for block in blocks {
                 switch block["type"] as? String {
@@ -135,8 +142,9 @@ public final class ClaudeCodeAdapter: AgentAdapter {
                 case "tool_use":
                     if let id = block["id"] as? String { state.pendingToolUseIds.insert(id) }
                     if block["name"] as? String == "TodoWrite",
-                       let input = block["input"] as? [String: Any],
-                       let todos = Self.todos(from: input) {
+                        let input = block["input"] as? [String: Any],
+                        let todos = Self.todos(from: input)
+                    {
                         state.todos = todos
                     }
                 default:

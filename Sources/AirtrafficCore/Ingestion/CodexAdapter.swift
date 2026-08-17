@@ -22,14 +22,16 @@ public final class CodexAdapter: AgentAdapter {
         var lastRoleIsAssistant = false
         var lastTimestamp: Date?
         var todos: [TodoItem] = []
-        var pendingCalls = 0     // function_call without function_call_output
-        var tasksInFlight = 0    // task_started without task_complete
+        var pendingCalls = 0  // function_call without function_call_output
+        var tasksInFlight = 0  // task_started without task_complete
         var newText = ""
         var primed = false
     }
 
     public init(root: URL? = nil, config: ScanConfig = .default) {
-        self.root = root ?? FileManager.default.homeDirectoryForCurrentUser
+        self.root =
+            root
+            ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions")
         self.config = config
     }
@@ -37,8 +39,10 @@ public final class CodexAdapter: AgentAdapter {
     public func scan(now: Date) throws -> [SessionSnapshot] {
         var snapshots: [SessionSnapshot] = []
         for file in recentRolloutFiles(now: now) {
-            guard let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate else { continue }
+            guard
+                let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate
+            else { continue }
             if let snapshot = try? scanFile(file, mtime: mtime, now: now) {
                 snapshots.append(snapshot)
             }
@@ -54,7 +58,8 @@ public final class CodexAdapter: AgentAdapter {
         var day = now.addingTimeInterval(-config.lookback)
         while day <= now.addingTimeInterval(24 * 3600) {
             let parts = calendar.dateComponents([.year, .month, .day], from: day)
-            let dir = root
+            let dir =
+                root
                 .appendingPathComponent(String(format: "%04d", parts.year ?? 0))
                 .appendingPathComponent(String(format: "%02d", parts.month ?? 0))
                 .appendingPathComponent(String(format: "%02d", parts.day ?? 0))
@@ -67,8 +72,10 @@ public final class CodexAdapter: AgentAdapter {
             day = day.addingTimeInterval(24 * 3600)
         }
         return files.filter { file in
-            guard let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate else { return false }
+            guard
+                let mtime = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate
+            else { return false }
             return now.timeIntervalSince(mtime) < config.lookback
         }
     }
@@ -170,9 +177,10 @@ public final class CodexAdapter: AgentAdapter {
             // Codex maintains its plan via the update_plan tool; that plan is
             // the session's deterministic todo list.
             if payload["name"] as? String == "update_plan",
-               let argumentsJSON = payload["arguments"] as? String,
-               let arguments = JSONLine.parse(argumentsJSON),
-               let plan = arguments["plan"] as? [[String: Any]] {
+                let argumentsJSON = payload["arguments"] as? String,
+                let arguments = JSONLine.parse(argumentsJSON),
+                let plan = arguments["plan"] as? [[String: Any]]
+            {
                 state.todos = plan.compactMap { step in
                     guard let content = step["step"] as? String else { return nil }
                     let status = TodoItem.Status(rawValue: step["status"] as? String ?? "") ?? .pending

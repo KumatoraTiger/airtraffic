@@ -19,9 +19,13 @@ public final class GrokAdapter: AgentAdapter {
         var primed = false
     }
 
-    public init(home: URL? = nil, config: ScanConfig = .default,
-         isProcessAlive: @escaping (Int32) -> Bool = { kill($0, 0) == 0 }) {
-        self.home = home ?? FileManager.default.homeDirectoryForCurrentUser
+    public init(
+        home: URL? = nil, config: ScanConfig = .default,
+        isProcessAlive: @escaping (Int32) -> Bool = { kill($0, 0) == 0 }
+    ) {
+        self.home =
+            home
+            ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".grok")
         self.config = config
         self.isProcessAlive = isProcessAlive
@@ -30,16 +34,19 @@ public final class GrokAdapter: AgentAdapter {
     public func scan(now: Date) throws -> [SessionSnapshot] {
         let fileManager = FileManager.default
         let sessionsRoot = home.appendingPathComponent("sessions")
-        guard let cwdDirs = try? fileManager.contentsOfDirectory(
-            at: sessionsRoot, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
-        ) else { return [] }
+        guard
+            let cwdDirs = try? fileManager.contentsOfDirectory(
+                at: sessionsRoot, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+            )
+        else { return [] }
 
         let liveSessionIds = liveSessions()
         var snapshots: [SessionSnapshot] = []
         for cwdDir in cwdDirs where cwdDir.hasDirectoryPath || isDirectory(cwdDir) {
-            let sessionDirs = (try? fileManager.contentsOfDirectory(
-                at: cwdDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
-            )) ?? []
+            let sessionDirs =
+                (try? fileManager.contentsOfDirectory(
+                    at: cwdDir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+                )) ?? []
             for sessionDir in sessionDirs {
                 if let snapshot = try? scanSession(sessionDir, liveSessionIds: liveSessionIds, now: now) {
                     snapshots.append(snapshot)
@@ -53,7 +60,7 @@ public final class GrokAdapter: AgentAdapter {
     private func liveSessions() -> Set<String> {
         let url = home.appendingPathComponent("active_sessions.json")
         guard let data = try? Data(contentsOf: url),
-              let entries = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+            let entries = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
         else { return [] }
         var ids: Set<String> = []
         for entry in entries {
@@ -67,15 +74,18 @@ public final class GrokAdapter: AgentAdapter {
     private func scanSession(_ dir: URL, liveSessionIds: Set<String>, now: Date) throws -> SessionSnapshot? {
         let summaryURL = dir.appendingPathComponent("summary.json")
         guard let data = try? Data(contentsOf: summaryURL),
-              let summary = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let summary = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
 
-        let sessionId = (summary["info"] as? [String: Any])?["id"] as? String
+        let sessionId =
+            (summary["info"] as? [String: Any])?["id"] as? String
             ?? dir.lastPathComponent
-        let updatedAt = (summary["updated_at"] as? String).flatMap(ISO8601.date)
+        let updatedAt =
+            (summary["updated_at"] as? String).flatMap(ISO8601.date)
             ?? (summary["last_active_at"] as? String).flatMap(ISO8601.date)
         guard let lastActivity = updatedAt,
-              now.timeIntervalSince(lastActivity) < config.lookback else { return nil }
+            now.timeIntervalSince(lastActivity) < config.lookback
+        else { return nil }
 
         let state = states[dir.path] ?? State()
         let isFirstParse = !state.primed
@@ -96,13 +106,15 @@ public final class GrokAdapter: AgentAdapter {
         let isLive = liveSessionIds.contains(sessionId)
         let status: SessionStatus
         if isLive {
-            status = now.timeIntervalSince(lastActivity) < config.activeWindow
+            status =
+                now.timeIntervalSince(lastActivity) < config.activeWindow
                 ? .running : .waitingInput
         } else {
             status = .idle
         }
 
-        let title = summary["session_summary"] as? String
+        let title =
+            summary["session_summary"] as? String
             ?? summary["generated_title"] as? String
             ?? state.lastUserText
         let lastTurnSummary = summary["last_turn_summary"] as? String ?? ""

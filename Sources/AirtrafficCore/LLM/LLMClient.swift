@@ -61,8 +61,10 @@ public struct LLMRequest: Sendable {
     public var jsonMode: Bool
     public var maxTokens: Int
 
-    public init(system: String? = nil, messages: [ChatMessage],
-                jsonMode: Bool = false, maxTokens: Int = 4096) {
+    public init(
+        system: String? = nil, messages: [ChatMessage],
+        jsonMode: Bool = false, maxTokens: Int = 4096
+    ) {
         self.system = system
         self.messages = messages
         self.jsonMode = jsonMode
@@ -112,22 +114,26 @@ public enum LLMJSON {
     /// Extracts the first JSON object or array from model output, tolerating
     /// markdown fences and surrounding prose.
     public static func extractJSON(from text: String) -> Data? {
-        let trimmed = text
+        let trimmed =
+            text
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let data = trimmed.data(using: .utf8),
-           (try? JSONSerialization.jsonObject(with: data)) != nil {
+            (try? JSONSerialization.jsonObject(with: data)) != nil
+        {
             return data
         }
         // Fall back to the outermost {...} or [...] span.
         for (open, close) in [("{", "}"), ("[", "]")] {
             if let start = trimmed.range(of: open)?.lowerBound,
-               let end = trimmed.range(of: close, options: .backwards)?.upperBound,
-               start < end {
+                let end = trimmed.range(of: close, options: .backwards)?.upperBound,
+                start < end
+            {
                 let candidate = String(trimmed[start..<end])
                 if let data = candidate.data(using: .utf8),
-                   (try? JSONSerialization.jsonObject(with: data)) != nil {
+                    (try? JSONSerialization.jsonObject(with: data)) != nil
+                {
                     return data
                 }
             }

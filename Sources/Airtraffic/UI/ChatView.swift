@@ -1,5 +1,5 @@
-import SwiftUI
 import AirtrafficCore
+import SwiftUI
 
 struct ChatView: View {
     @Environment(AppModel.self) private var model
@@ -14,8 +14,9 @@ struct ChatView: View {
                             ContentUnavailableView(
                                 "優先順位の壁打ち",
                                 systemImage: "bubble.left.and.bubble.right",
-                                description: Text("「今なにを先にやるべき？」と聞くと、タスクとセッション状況をもとに順位と理由を提案します"))
-                                .padding(.top, 60)
+                                description: Text("「今なにを先にやるべき？」と聞くと、タスクとセッション状況をもとに順位と理由を提案します")
+                            )
+                            .padding(.top, 60)
                         }
                         ForEach(model.chatEntries) { entry in
                             ChatBubble(entry: entry)

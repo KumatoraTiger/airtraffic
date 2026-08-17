@@ -1,5 +1,5 @@
-import SwiftUI
 import AirtrafficCore
+import SwiftUI
 
 struct InboxView: View {
     @Environment(AppModel.self) private var model
@@ -95,7 +95,8 @@ struct CandidateRow: View {
             .padding(.vertical, 2)
             .background(
                 (candidate.confidence >= 0.7 ? Color.green : .orange).opacity(0.15),
-                in: Capsule())
+                in: Capsule()
+            )
             .foregroundStyle(candidate.confidence >= 0.7 ? .green : .orange)
     }
 }

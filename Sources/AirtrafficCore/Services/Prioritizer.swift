@@ -17,21 +17,21 @@ public struct Prioritizer: Sendable {
         preferences: [PreferenceNote]
     ) -> String {
         var prompt = """
-        あなたは並列で動くコーディングエージェントのタスクの優先順位付けを、ユーザーとの壁打ちで支援するアシスタントです。
+            あなたは並列で動くコーディングエージェントのタスクの優先順位付けを、ユーザーとの壁打ちで支援するアシスタントです。
 
-        原則:
-        - 順位はあなたが決めるのではなく提案する。必ず理由を添える。
-        - 入力待ち・承認待ちのセッションに紐づくタスクは、数秒の対応で進むため原則優先度が高い。
-        - ユーザーが順位を変えたら、その判断を尊重し preference として学ぶ。
-        - 簡潔に。順位と理由が中心で、前置きは不要。
+            原則:
+            - 順位はあなたが決めるのではなく提案する。必ず理由を添える。
+            - 入力待ち・承認待ちのセッションに紐づくタスクは、数秒の対応で進むため原則優先度が高い。
+            - ユーザーが順位を変えたら、その判断を尊重し preference として学ぶ。
+            - 簡潔に。順位と理由が中心で、前置きは不要。
 
-        順位の提案・変更に合意が取れたときだけ、返答の最後に次の形式のブロックを1つ出力する:
-        ```ranking
-        ["task-id-1", "task-id-2", ...]
-        ```
-        雑談や質問への回答だけのときは ranking ブロックを出さない。
+            順位の提案・変更に合意が取れたときだけ、返答の最後に次の形式のブロックを1つ出力する:
+            ```ranking
+            ["task-id-1", "task-id-2", ...]
+            ```
+            雑談や質問への回答だけのときは ranking ブロックを出さない。
 
-        """
+            """
         prompt += "\n# 現在のタスク一覧\n"
         if tasks.isEmpty {
             prompt += "（なし）\n"
@@ -43,7 +43,8 @@ public struct Prioritizer: Sendable {
         }
         prompt += "\n# セッション状況\n"
         for session in sessions.prefix(20) {
-            prompt += "- [\(session.agent.displayName)] \(session.status.displayName): \(session.title)（\(session.projectName)）\n"
+            prompt +=
+                "- [\(session.agent.displayName)] \(session.status.displayName): \(session.title)（\(session.projectName)）\n"
         }
         if !preferences.isEmpty {
             prompt += "\n# ユーザーの優先順位づけの傾向（過去の学習）\n"
@@ -61,8 +62,8 @@ public struct Prioritizer: Sendable {
         guard let end = tail.range(of: "```") else { return nil }
         let jsonText = String(tail[..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = jsonText.data(using: .utf8),
-              let ids = (try? JSONSerialization.jsonObject(with: data)) as? [String],
-              !ids.isEmpty
+            let ids = (try? JSONSerialization.jsonObject(with: data)) as? [String],
+            !ids.isEmpty
         else { return nil }
         return RankingProposal(orderedTaskIds: ids)
     }

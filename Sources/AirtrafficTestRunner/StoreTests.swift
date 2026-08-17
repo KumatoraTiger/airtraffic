@@ -1,5 +1,5 @@
-import Foundation
 import AirtrafficCore
+import Foundation
 
 struct StoreTests {
     private func makeStore() throws -> (Store, String) {

@@ -1,6 +1,6 @@
+import AirtrafficCore
 import Foundation
 import SwiftUI
-import AirtrafficCore
 
 /// A single chat entry in the prioritization panel.
 struct ChatEntry: Identifiable, Hashable {
@@ -52,11 +52,13 @@ final class AppModel {
 
     init() {
         extractionEnabled = UserDefaults.standard.object(forKey: "extractionEnabled") as? Bool ?? false
-        selectedProvider = ProviderKind(
-            rawValue: UserDefaults.standard.string(forKey: "provider") ?? "") ?? .gemini
+        selectedProvider =
+            ProviderKind(
+                rawValue: UserDefaults.standard.string(forKey: "provider") ?? "") ?? .gemini
         var models: [ProviderKind: String] = [:]
         for kind in ProviderKind.allCases {
-            models[kind] = UserDefaults.standard.string(forKey: "model.\(kind.rawValue)")
+            models[kind] =
+                UserDefaults.standard.string(forKey: "model.\(kind.rawValue)")
                 ?? kind.defaultModel
         }
         self.models = models
@@ -81,7 +83,8 @@ final class AppModel {
         let snapshots = await coordinator.scan()
         sessions = snapshots
         for snapshot in snapshots where !snapshot.newTranscriptText.isEmpty {
-            var entry = pendingText[snapshot.id]
+            var entry =
+                pendingText[snapshot.id]
                 ?? (title: snapshot.title, agent: snapshot.agent, text: "")
             entry.text += snapshot.newTranscriptText
             entry.title = snapshot.title
@@ -119,9 +122,10 @@ final class AppModel {
         let client = LLMClientFactory.make(
             kind: kind, apiKey: key, model: models[kind] ?? kind.defaultModel)
         do {
-            _ = try await client.complete(LLMRequest(
-                messages: [ChatMessage(role: .user, text: "OK とだけ返答してください")],
-                maxTokens: 16))
+            _ = try await client.complete(
+                LLMRequest(
+                    messages: [ChatMessage(role: .user, text: "OK とだけ返答してください")],
+                    maxTokens: 16))
             return "接続 OK"
         } catch {
             return "失敗: \(error)"
@@ -138,10 +142,12 @@ final class AppModel {
         let rejected = (try? await store.rejectedTitles()) ?? []
 
         for (sessionId, entry) in pending {
-            guard let extractions = try? await extractor.extract(
-                client: client, newText: entry.text, sessionTitle: entry.title,
-                existingTitles: existingTitles, rejectedTitles: rejected
-            ) else { continue }
+            guard
+                let extractions = try? await extractor.extract(
+                    client: client, newText: entry.text, sessionTitle: entry.title,
+                    existingTitles: existingTitles, rejectedTitles: rejected
+                )
+            else { continue }
             for extraction in extractions {
                 let candidate = Candidate(
                     id: UUID().uuidString,
@@ -250,17 +256,20 @@ final class AppModel {
             let history = chatEntries.map { entry in
                 ChatMessage(role: entry.sender == .user ? .user : .assistant, text: entry.text)
             }
-            let reply = try await client.complete(LLMRequest(
-                system: system, messages: history, maxTokens: 4096))
+            let reply = try await client.complete(
+                LLMRequest(
+                    system: system, messages: history, maxTokens: 4096))
             let proposal = prioritizer.parseRanking(from: reply)
-            chatEntries.append(ChatEntry(
-                sender: .assistant,
-                text: prioritizer.displayText(from: reply),
-                proposal: proposal?.orderedTaskIds))
+            chatEntries.append(
+                ChatEntry(
+                    sender: .assistant,
+                    text: prioritizer.displayText(from: reply),
+                    proposal: proposal?.orderedTaskIds))
         } catch {
             lastError = "\(error)"
-            chatEntries.append(ChatEntry(
-                sender: .assistant, text: "エラー: \(error)", proposal: nil))
+            chatEntries.append(
+                ChatEntry(
+                    sender: .assistant, text: "エラー: \(error)", proposal: nil))
         }
     }
 

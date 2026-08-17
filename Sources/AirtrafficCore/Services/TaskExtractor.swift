@@ -34,49 +34,53 @@ public struct TaskExtractor: Sendable {
         guard !chunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         let system = """
-        あなたはコーディングエージェントのセッションログから「人間が後で対応すべきタスク」を抽出するアシスタントです。
+            あなたはコーディングエージェントのセッションログから「人間が後で対応すべきタスク」を抽出するアシスタントです。
 
-        抽出するもの:
-        - ユーザーやエージェントが言及した、まだ完了していない作業（「あとで直す」「別タスクにする」「TODO」など）
-        - セッションのスコープ外として先送りされた作業
-        - エージェントが提案し、ユーザーが暗黙的・明示的に合意した追加作業
+            抽出するもの:
+            - ユーザーやエージェントが言及した、まだ完了していない作業（「あとで直す」「別タスクにする」「TODO」など）
+            - セッションのスコープ外として先送りされた作業
+            - エージェントが提案し、ユーザーが暗黙的・明示的に合意した追加作業
 
-        抽出しないもの:
-        - このセッション内で既に完了した作業
-        - エージェント自身が今まさに実行中の作業
-        - 一般論や仮定の話
-        - 既存タスク一覧にあるものと実質同じもの
+            抽出しないもの:
+            - このセッション内で既に完了した作業
+            - エージェント自身が今まさに実行中の作業
+            - 一般論や仮定の話
+            - 既存タスク一覧にあるものと実質同じもの
 
-        出力は次の JSON のみ: {"candidates": [{"title": "簡潔な日本語タイトル", "detail": "背景を1-2文", "confidence": 0.0-1.0, "excerpt": "根拠となるログの短い引用"}]}
-        該当がなければ {"candidates": []} を返す。確信が持てないものは confidence を低くする。
-        """
+            出力は次の JSON のみ: {"candidates": [{"title": "簡潔な日本語タイトル", "detail": "背景を1-2文", "confidence": 0.0-1.0, "excerpt": "根拠となるログの短い引用"}]}
+            該当がなければ {"candidates": []} を返す。確信が持てないものは confidence を低くする。
+            """
 
         var prompt = "# セッション: \(sessionTitle)\n\n"
         if !existingTitles.isEmpty {
-            prompt += "# 既存タスク（重複させない）:\n"
+            prompt +=
+                "# 既存タスク（重複させない）:\n"
                 + existingTitles.prefix(30).map { "- \($0)" }.joined(separator: "\n") + "\n\n"
         }
         if !rejectedTitles.isEmpty {
-            prompt += "# 過去に却下された候補（同種のものは抽出しない）:\n"
+            prompt +=
+                "# 過去に却下された候補（同種のものは抽出しない）:\n"
                 + rejectedTitles.prefix(20).map { "- \($0)" }.joined(separator: "\n") + "\n\n"
         }
         prompt += "# 新着ログ:\n\(chunk)"
 
-        let response = try await client.complete(LLMRequest(
-            system: system,
-            messages: [ChatMessage(role: .user, text: prompt)],
-            jsonMode: true,
-            maxTokens: 2048
-        ))
+        let response = try await client.complete(
+            LLMRequest(
+                system: system,
+                messages: [ChatMessage(role: .user, text: prompt)],
+                jsonMode: true,
+                maxTokens: 2048
+            ))
 
         guard let data = LLMJSON.extractJSON(from: response),
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let raw = json["candidates"] as? [[String: Any]]
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let raw = json["candidates"] as? [[String: Any]]
         else { return [] }
 
         return raw.compactMap { item in
             guard let title = item["title"] as? String, !title.isEmpty else { return nil }
-            let confidence = (item["confidence"] as? Double)
+            let confidence =
+                (item["confidence"] as? Double)
                 ?? (item["confidence"] as? Int).map(Double.init) ?? 0
             guard confidence >= confidenceThreshold else { return nil }
             return Extraction(

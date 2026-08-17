@@ -1,5 +1,5 @@
-import SwiftUI
 import AirtrafficCore
+import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
     case sessions

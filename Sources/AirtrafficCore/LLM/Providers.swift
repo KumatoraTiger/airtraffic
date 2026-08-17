@@ -15,8 +15,9 @@ private func postJSON(url: URL, headers: [String: String], body: [String: Any]) 
 
     let (data, response) = try await URLSession.shared.data(for: request)
     if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-        throw LLMError.httpError(status: http.statusCode,
-                                 body: String(decoding: data, as: UTF8.self))
+        throw LLMError.httpError(
+            status: http.statusCode,
+            body: String(decoding: data, as: UTF8.self))
     }
     return data
 }
@@ -40,8 +41,9 @@ public struct GeminiClient: LLMClient {
 
     public func complete(_ request: LLMRequest) async throws -> String {
         guard !apiKey.isEmpty else { throw LLMError.missingAPIKey(.gemini) }
-        let url = URL(string:
-            "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!
+        let url = URL(
+            string:
+                "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!
 
         var body: [String: Any] = [
             "contents": request.messages.map { message in
@@ -63,8 +65,8 @@ public struct GeminiClient: LLMClient {
         let data = try await postJSON(url: url, headers: ["x-goog-api-key": apiKey], body: body)
         let json = parse(data)
         guard let candidates = json["candidates"] as? [[String: Any]],
-              let content = candidates.first?["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]]
+            let content = candidates.first?["content"] as? [String: Any],
+            let parts = content["parts"] as? [[String: Any]]
         else { throw LLMError.emptyResponse }
         let text = parts.compactMap { $0["text"] as? String }.joined()
         guard !text.isEmpty else { throw LLMError.emptyResponse }
@@ -108,8 +110,8 @@ public struct OpenAIClient: LLMClient {
             url: url, headers: ["Authorization": "Bearer \(apiKey)"], body: body)
         let json = parse(data)
         guard let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let text = message["content"] as? String, !text.isEmpty
+            let message = choices.first?["message"] as? [String: Any],
+            let text = message["content"] as? String, !text.isEmpty
         else { throw LLMError.emptyResponse }
         return text
     }
@@ -141,10 +143,12 @@ public struct AnthropicClient: LLMClient {
             body["system"] = system
         }
 
-        let data = try await postJSON(url: url, headers: [
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-        ], body: body)
+        let data = try await postJSON(
+            url: url,
+            headers: [
+                "x-api-key": apiKey,
+                "anthropic-version": "2023-06-01",
+            ], body: body)
         let json = parse(data)
         // Safety classifiers can decline with HTTP 200 + stop_reason "refusal";
         // check before reading content.
@@ -154,7 +158,8 @@ public struct AnthropicClient: LLMClient {
         guard let blocks = json["content"] as? [[String: Any]] else {
             throw LLMError.emptyResponse
         }
-        let text = blocks
+        let text =
+            blocks
             .filter { $0["type"] as? String == "text" }
             .compactMap { $0["text"] as? String }
             .joined()

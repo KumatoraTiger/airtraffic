@@ -1,5 +1,5 @@
-import SwiftUI
 import AirtrafficCore
+import SwiftUI
 
 struct SessionsView: View {
     @Environment(AppModel.self) private var model
@@ -26,8 +26,10 @@ struct SessionsView: View {
                         SessionRow(session: session)
                     }
                 } header: {
-                    Label(sectionTitle(status, count: items.count),
-                          systemImage: statusSymbol(status))
+                    Label(
+                        sectionTitle(status, count: items.count),
+                        systemImage: statusSymbol(status)
+                    )
                     .foregroundStyle(statusColor(status))
                 }
             }

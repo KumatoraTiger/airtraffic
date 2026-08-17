@@ -1,5 +1,5 @@
-import SwiftUI
 import AirtrafficCore
+import SwiftUI
 
 struct TasksView: View {
     @Environment(AppModel.self) private var model
@@ -86,11 +86,12 @@ struct TaskRow: View {
     }
 
     private var sourceBadge: some View {
-        let (label, color): (String, Color) = switch task.source {
-        case .deterministic: ("todo", .blue)
-        case .llm: ("AI", .purple)
-        case .manual: ("手動", .gray)
-        }
+        let (label, color): (String, Color) =
+            switch task.source {
+            case .deterministic: ("todo", .blue)
+            case .llm: ("AI", .purple)
+            case .manual: ("手動", .gray)
+            }
         return Text(label)
             .font(.caption2)
             .padding(.horizontal, 6)
