@@ -1,4 +1,5 @@
 import SwiftUI
+import AirtrafficCore
 
 @main
 struct AirtrafficApp: App {
