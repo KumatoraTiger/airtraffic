@@ -35,6 +35,17 @@ enum Lane: String, CaseIterable, Identifiable {
         case .chat: 300
         }
     }
+
+    /// Identity color, used to tint the lane header so stacked lanes stay
+    /// visually separable.
+    var tint: Color {
+        switch self {
+        case .sessions: .orange
+        case .tasks: .blue
+        case .inbox: .purple
+        case .chat: .teal
+        }
+    }
 }
 
 /// Two-dimensional lane layout: columns side by side, each column a
@@ -226,7 +237,7 @@ struct RootView: View {
                     }
                 }
         }
-        .foregroundStyle(layout.contains(lane) ? Color.accentColor : Color.secondary)
+        .foregroundStyle(layout.contains(lane) ? lane.tint : Color.secondary)
         .keyboardShortcut(shortcutKey(for: lane), modifiers: .command)
         .help("\(lane.label)レーンを開閉 (⌘\(shortcutNumber(for: lane)))")
     }
@@ -279,6 +290,7 @@ private struct LaneColumn: View {
             HStack(spacing: 6) {
                 Label(lane.label, systemImage: lane.symbol)
                     .font(.headline)
+                    .foregroundStyle(lane.tint)
                 headerBadge
                 Spacer()
                 moveMenu
@@ -294,7 +306,12 @@ private struct LaneColumn: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            Divider()
+            .background(lane.tint.opacity(0.12))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(lane.tint.opacity(0.55))
+                    .frame(height: 2)
+            }
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
