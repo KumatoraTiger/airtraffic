@@ -20,7 +20,6 @@ struct InboxView: View {
                 CandidateRow(candidate: candidate)
             }
         }
-        .navigationTitle("Inbox（タスク候補）")
     }
 }
 

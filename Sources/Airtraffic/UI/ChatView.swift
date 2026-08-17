@@ -44,7 +44,6 @@ struct ChatView: View {
             }
             .padding(10)
         }
-        .navigationTitle("壁打ち")
     }
 
     private func submit() {

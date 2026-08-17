@@ -34,7 +34,6 @@ struct SessionsView: View {
                 }
             }
         }
-        .navigationTitle("管制")
     }
 
     private func sectionTitle(_ status: SessionStatus, count: Int) -> String {

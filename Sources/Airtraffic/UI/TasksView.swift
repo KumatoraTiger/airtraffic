@@ -38,7 +38,6 @@ struct TasksView: View {
             }
             .padding(10)
         }
-        .navigationTitle("タスク")
     }
 
     private func submit() {
