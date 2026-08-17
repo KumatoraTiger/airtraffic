@@ -166,7 +166,7 @@ final class AppModel {
                     createdAt: Date(),
                     rejectReason: nil
                 )
-                try? await store.insertCandidate(candidate)
+                _ = try? await store.insertCandidate(candidate)
                 // Sessions later in this pass see it in their prompt too.
                 known.pendingCandidates.append(extraction.title)
             }
