@@ -1,11 +1,11 @@
 import Foundation
 
-/// Title normalization and fuzzy matching, shared by the extractor (soft dedupe
-/// before a candidate is created) and the store (hard dedupe key in SQLite).
+/// Title normalization and fuzzy matching, used by the board assembler to
+/// attach sessions to tasks and merge same-work sessions.
 public enum TitleMatcher {
     /// Canonical form of a title: width- and case-folded, with whitespace,
-    /// punctuation, and symbols removed. Two titles with the same key are the
-    /// same task as far as the inbox is concerned.
+    /// punctuation, and symbols removed. Two titles with the same key count
+    /// as the same work.
     public static func key(_ title: String) -> String {
         String(
             title.precomposedStringWithCompatibilityMapping

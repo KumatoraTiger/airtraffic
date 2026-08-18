@@ -24,8 +24,6 @@ public final class CodexAdapter: AgentAdapter {
         var todos: [TodoItem] = []
         var pendingCalls = 0  // function_call without function_call_output
         var tasksInFlight = 0  // task_started without task_complete
-        var newText = ""
-        var primed = false
     }
 
     public init(root: URL? = nil, config: ScanConfig = .default) {
@@ -82,22 +80,17 @@ public final class CodexAdapter: AgentAdapter {
 
     private func scanFile(_ file: URL, mtime: Date, now: Date) throws -> SessionSnapshot? {
         let state = states[file.path] ?? State()
-        let isFirstParse = !state.primed
         let (lines, newOffset) = try FileTail.readNewLines(url: file, from: state.offset)
         state.offset = newOffset
         for line in lines {
             guard let object = JSONLine.parse(line) else { continue }
-            ingest(object, into: state, collectText: !isFirstParse)
+            ingest(object, into: state)
         }
-        state.primed = true
         states[file.path] = state
 
         guard !state.sessionId.isEmpty else { return nil }
         // Subagent rollouts (judges, reviewers spawned by a parent thread) are noise here.
         if state.isSubagent { return nil }
-
-        let newText = state.newText
-        state.newText = ""
 
         let status = StatusResolver.resolve(
             lastActivity: state.lastTimestamp ?? mtime,
@@ -117,12 +110,11 @@ public final class CodexAdapter: AgentAdapter {
             filePath: file.path,
             todos: state.todos,
             lastUserText: state.lastUserText,
-            lastAssistantText: state.lastAssistantText,
-            newTranscriptText: newText
+            lastAssistantText: state.lastAssistantText
         )
     }
 
-    private func ingest(_ object: [String: Any], into state: State, collectText: Bool) {
+    private func ingest(_ object: [String: Any], into state: State) {
         if let timestamp = object["timestamp"] as? String, let date = ISO8601.date(timestamp) {
             state.lastTimestamp = date
         }
@@ -137,7 +129,7 @@ public final class CodexAdapter: AgentAdapter {
                 state.isSubagent = true
             }
         case "event_msg":
-            ingestEvent(payload, into: state, collectText: collectText)
+            ingestEvent(payload, into: state)
         case "response_item":
             ingestResponseItem(payload, into: state)
         default:
@@ -145,7 +137,7 @@ public final class CodexAdapter: AgentAdapter {
         }
     }
 
-    private func ingestEvent(_ payload: [String: Any], into state: State, collectText: Bool) {
+    private func ingestEvent(_ payload: [String: Any], into state: State) {
         let text = payload["message"] as? String ?? ""
         switch payload["type"] as? String {
         case "user_message":
@@ -153,12 +145,10 @@ public final class CodexAdapter: AgentAdapter {
             if state.firstUserText == nil { state.firstUserText = text }
             state.lastUserText = text
             state.lastRoleIsAssistant = false
-            if collectText { state.newText += "[user] \(text)\n" }
         case "agent_message":
             guard !text.isEmpty else { return }
             state.lastAssistantText = text
             state.lastRoleIsAssistant = true
-            if collectText { state.newText += "[assistant] \(text)\n" }
         case "task_started":
             state.tasksInFlight += 1
         case "task_complete":

@@ -1,8 +1,7 @@
 # Airtraffic — development guide for coding agents
 
 macOS app that watches local coding-agent sessions (Claude Code / Codex / Grok),
-surfaces which ones are waiting on the user, extracts task candidates via an LLM,
-and helps prioritize them in a chat.
+surfaces which ones are waiting on the user, and helps prioritize tasks in a chat.
 
 ## Commands
 
@@ -30,19 +29,17 @@ Constraints of this environment:
 Three SPM targets:
 
 - `AirtrafficCore` (library, public API) — all logic, no UI
-  - `Models/` — `SessionSnapshot`, `TaskItem`, `Candidate`, `PreferenceNote`
+  - `Models/` — `SessionSnapshot`, `TaskItem`, `PreferenceNote`
   - `Ingestion/` — one adapter per agent + shared `StatusResolver` / `FileTail`.
     Adapters are **stateful incremental parsers**: first scan parses the whole
-    file to rebuild state, later scans read only appended bytes. The initial
-    parse never emits `newTranscriptText` (so the inbox isn't flooded with
-    history on app start).
-  - `Store/` — SQLite persistence (tasks, candidates, preferences, cursors).
+    file to rebuild state, later scans read only appended bytes.
+  - `Store/` — SQLite persistence (tasks, preferences, cursors).
     Sessions are NOT persisted; transcripts on disk are the source of truth.
   - `LLM/` — provider-agnostic `LLMClient` + Gemini/OpenAI/Anthropic raw-HTTP
     clients + `KeychainStore`. Adding a provider = new client + a case in
     `ProviderKind` + `LLMClientFactory`.
-  - `Services/` — `IngestionCoordinator` (scan loop), `TaskExtractor`
-    (LLM → inbox candidates), `Prioritizer` (chat prompts + ranking parsing)
+  - `Services/` — `IngestionCoordinator` (scan loop), `SessionLabeler`
+    (LLM → work labels), `Prioritizer` (chat prompts + ranking parsing)
 - `Airtraffic` (executable) — SwiftUI app. `AppModel` is the single
   `@Observable` state holder; views are thin.
 - `airtraffic-tests` (executable) — the test suite.

@@ -22,8 +22,6 @@ public final class ClaudeCodeAdapter: AgentAdapter {
         var isSidechain = false
         var todos: [TodoItem] = []
         var pendingToolUseIds: Set<String> = []
-        var newText = ""
-        var primed = false  // true once the initial full parse is done
     }
 
     public init(root: URL? = nil, config: ScanConfig = .default) {
@@ -66,23 +64,18 @@ public final class ClaudeCodeAdapter: AgentAdapter {
 
     private func scanFile(_ file: URL, mtime: Date, now: Date) throws -> SessionSnapshot? {
         let state = states[file.path] ?? State()
-        let isFirstParse = !state.primed
         let (lines, newOffset) = try FileTail.readNewLines(url: file, from: state.offset)
         state.offset = newOffset
         for line in lines {
             guard let object = JSONLine.parse(line) else { continue }
-            ingest(object, into: state, collectText: !isFirstParse)
+            ingest(object, into: state)
         }
-        state.primed = true
         states[file.path] = state
 
         guard !state.sessionId.isEmpty else { return nil }
         // Sidechains are subagent transcripts inside the same file tree; they are
         // not sessions the user drives directly.
         if state.isSidechain { return nil }
-
-        let newText = state.newText
-        state.newText = ""
 
         let status = StatusResolver.resolve(
             lastActivity: state.lastTimestamp ?? mtime,
@@ -102,12 +95,11 @@ public final class ClaudeCodeAdapter: AgentAdapter {
             filePath: file.path,
             todos: state.todos,
             lastUserText: state.lastUserText,
-            lastAssistantText: state.lastAssistantText,
-            newTranscriptText: newText
+            lastAssistantText: state.lastAssistantText
         )
     }
 
-    private func ingest(_ object: [String: Any], into state: State, collectText: Bool) {
+    private func ingest(_ object: [String: Any], into state: State) {
         if let sessionId = object["sessionId"] as? String, state.sessionId.isEmpty {
             state.sessionId = sessionId
         }
@@ -128,7 +120,6 @@ public final class ClaudeCodeAdapter: AgentAdapter {
                 if state.firstUserText == nil { state.firstUserText = text }
                 state.lastUserText = text
                 state.lastRoleIsAssistant = false
-                if collectText { state.newText += "[user] \(text)\n" }
             }
         case "assistant":
             guard let message = object["message"] as? [String: Any],
@@ -152,9 +143,7 @@ public final class ClaudeCodeAdapter: AgentAdapter {
                 }
             }
             if !texts.isEmpty {
-                let joined = texts.joined(separator: "\n")
-                state.lastAssistantText = joined
-                if collectText { state.newText += "[assistant] \(joined)\n" }
+                state.lastAssistantText = texts.joined(separator: "\n")
             }
             state.lastRoleIsAssistant = true
         default:

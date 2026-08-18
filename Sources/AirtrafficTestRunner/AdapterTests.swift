@@ -89,8 +89,6 @@ final class AdapterTests {
             expectEqual(session.todos.last?.status, .inProgress)
             // Last event is an assistant turn end 120s ago: waiting for user input.
             expectEqual(session.status, .waitingInput)
-            // The initial full parse never emits extraction text.
-            expectEqual(session.newTranscriptText, "")
         }
 
         await TestKit.shared.run("claudeCode: pending tool_use means waitingApproval") { [self] in
@@ -110,7 +108,7 @@ final class AdapterTests {
             expectEqual(session.status, .waitingApproval)
         }
 
-        await TestKit.shared.run("claudeCode: incremental scan emits only new text") { [self] in
+        await TestKit.shared.run("claudeCode: incremental scan picks up appended lines") { [self] in
             try setUp()
             defer { tearDown() }
             let file = tempDir.appendingPathComponent("proj/s-1.jsonl")
@@ -125,7 +123,7 @@ final class AdapterTests {
             try handle.close()
 
             let session = try unwrap(try adapter.scan(now: now).first)
-            expectEqual(session.newTranscriptText, "[user] second message\n")
+            expectEqual(session.lastUserText, "second message")
             expectEqual(session.status, .running)
         }
 

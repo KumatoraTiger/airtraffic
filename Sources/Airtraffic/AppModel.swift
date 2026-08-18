@@ -20,15 +20,12 @@ final class AppModel {
     var tasks: [TaskItem] = []
     /// LLM-generated work labels ("レビュー: …") by session id.
     var labels: [String: WorkLabel] = [:]
-    var candidates: [Candidate] = []
-    /// Recently rejected or expired proposals, revertable from the board.
-    var closedCandidates: [Candidate] = []
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
     var lastError: String?
-    var extractionEnabled: Bool {
-        didSet { UserDefaults.standard.set(extractionEnabled, forKey: "extractionEnabled") }
+    var labelingEnabled: Bool {
+        didSet { UserDefaults.standard.set(labelingEnabled, forKey: "labelingEnabled") }
     }
     var selectedProvider: ProviderKind {
         didSet { UserDefaults.standard.set(selectedProvider.rawValue, forKey: "provider") }
@@ -60,26 +57,21 @@ final class AppModel {
         BoardAssembler.assemble(tasks: tasks, sessions: sessions, labels: labels)
     }
 
-    /// Proposals that expired untouched; shown inside 完了.
-    var expiredCandidates: [Candidate] { closedCandidates.filter { $0.status == .expired } }
-    /// Proposals the user rejected; shown inside キャンセル.
-    var rejectedCandidates: [Candidate] { closedCandidates.filter { $0.status == .rejected } }
-
     // MARK: - Internals
 
     private let store: Store?
     private let coordinator: IngestionCoordinator
-    private let extractor = TaskExtractor()
     private let labeler = SessionLabeler()
     private let prioritizer = Prioritizer()
-    /// Transcript text accumulated per session since the last extraction pass.
-    private var pendingText: [String: (title: String, agent: AgentKind, text: String)] = [:]
     private var scanTask: Task<Void, Never>?
-    private var lastExtraction = Date.distantPast
-    private var lastExpiry = Date.distantPast
+    private var lastLabelPass = Date.distantPast
 
     init() {
-        extractionEnabled = UserDefaults.standard.object(forKey: "extractionEnabled") as? Bool ?? false
+        // The key was "extractionEnabled" while the toggle also covered the
+        // removed LLM-proposal feature; carry the old value over once.
+        labelingEnabled =
+            UserDefaults.standard.object(forKey: "labelingEnabled") as? Bool
+            ?? UserDefaults.standard.object(forKey: "extractionEnabled") as? Bool ?? false
         selectedProvider =
             ProviderKind(
                 rawValue: UserDefaults.standard.string(forKey: "provider") ?? "") ?? .gemini
@@ -108,41 +100,18 @@ final class AppModel {
     // MARK: - Scan loop
 
     private func scanOnce() async {
-        let snapshots = await coordinator.scan()
-        sessions = snapshots
-        for snapshot in snapshots where !snapshot.newTranscriptText.isEmpty {
-            var entry =
-                pendingText[snapshot.id]
-                ?? (title: snapshot.title, agent: snapshot.agent, text: "")
-            entry.text += snapshot.newTranscriptText
-            entry.title = snapshot.title
-            pendingText[snapshot.id] = entry
-        }
-        if extractionEnabled, Date().timeIntervalSince(lastExtraction) > 60 {
-            lastExtraction = Date()
-            await runExtractionPass()
+        sessions = await coordinator.scan()
+        if labelingEnabled, Date().timeIntervalSince(lastLabelPass) > 60 {
+            lastLabelPass = Date()
             await runLabelPass()
-        }
-        // Untouched proposals leave the board on their own; sweep periodically
-        // so this happens while the app stays open, not only at launch.
-        if Date().timeIntervalSince(lastExpiry) > 900 {
-            lastExpiry = Date()
-            if let store {
-                try? await store.expireCandidates(olderThan: 72 * 3600)
-                candidates = (try? await store.candidates()) ?? []
-                closedCandidates = (try? await store.closedCandidates()) ?? []
-            }
         }
     }
 
     private func refreshFromStore() async {
         guard let store else { return }
-        try? await store.expireCandidates(olderThan: 72 * 3600)
         try? await store.pruneLabels(olderThan: 30 * 24 * 3600)
         labels = (try? await store.labels()) ?? [:]
         tasks = (try? await store.tasks()) ?? []
-        candidates = (try? await store.candidates()) ?? []
-        closedCandidates = (try? await store.closedCandidates()) ?? []
         preferences = (try? await store.preferences()) ?? []
     }
 
@@ -174,48 +143,6 @@ final class AppModel {
         }
     }
 
-    // MARK: - Extraction (board proposals)
-
-    private func runExtractionPass() async {
-        guard let store, let client = try? makeClient() else { return }
-        let pending = pendingText
-        pendingText = [:]
-        // Archived tasks and already-handled candidates count as known: the
-        // point is to never surface something the user has seen before.
-        var known = TaskExtractor.KnownTitles(
-            tasks: ((try? await store.tasks(includeArchived: true)) ?? []).map(\.title),
-            pendingCandidates: candidates.map(\.title),
-            rejected: (try? await store.rejectedTitles()) ?? [],
-            otherSeen: (try? await store.knownCandidateTitles()) ?? []
-        )
-
-        for (sessionId, entry) in pending {
-            guard
-                let extractions = try? await extractor.extract(
-                    client: client, newText: entry.text, sessionTitle: entry.title, known: known
-                )
-            else { continue }
-            for extraction in extractions {
-                let candidate = Candidate(
-                    id: UUID().uuidString,
-                    title: extraction.title,
-                    detail: extraction.detail,
-                    confidence: extraction.confidence,
-                    sessionId: sessionId,
-                    agent: entry.agent,
-                    excerpt: extraction.excerpt,
-                    status: .pending,
-                    createdAt: Date(),
-                    rejectReason: nil
-                )
-                _ = try? await store.insertCandidate(candidate)
-                // Sessions later in this pass see it in their prompt too.
-                known.pendingCandidates.append(extraction.title)
-            }
-        }
-        candidates = (try? await store.candidates()) ?? []
-    }
-
     /// Labels sessions whose work label is missing or stale, a bounded batch
     /// per pass. Failures cost nothing: unlabeled rows keep their fallback
     /// titles and the next pass tries again.
@@ -238,34 +165,6 @@ final class AppModel {
                     updatedAt: Date(), labeledActivity: session.lastActivity))
         }
         labels = (try? await store.labels()) ?? labels
-    }
-
-    // MARK: - Proposal actions
-
-    /// Keeps a proposal as a persistent task. Nothing requires this: proposals
-    /// left alone simply expire off the board.
-    func keep(_ candidate: Candidate) async {
-        guard let store else { return }
-        let task = TaskItem(
-            id: UUID().uuidString, title: candidate.title, detail: candidate.detail,
-            status: .todo, rank: nil, source: .llm,
-            createdAt: Date(), updatedAt: Date(), sessionIds: [candidate.sessionId])
-        try? await store.upsertTask(task)
-        try? await store.setCandidateStatus(candidate.id, .accepted)
-        await refreshLists()
-    }
-
-    func reject(_ candidate: Candidate, reason: String?) async {
-        guard let store else { return }
-        try? await store.setCandidateStatus(candidate.id, .rejected, rejectReason: reason)
-        await refreshLists()
-    }
-
-    /// Brings a rejected or expired proposal back onto the board.
-    func reopen(_ candidate: Candidate) async {
-        guard let store else { return }
-        try? await store.reopenCandidate(candidate.id)
-        await refreshLists()
     }
 
     // MARK: - Task actions
@@ -372,8 +271,6 @@ final class AppModel {
     private func refreshLists() async {
         guard let store else { return }
         tasks = (try? await store.tasks()) ?? []
-        candidates = (try? await store.candidates()) ?? []
-        closedCandidates = (try? await store.closedCandidates()) ?? []
         preferences = (try? await store.preferences()) ?? []
     }
 

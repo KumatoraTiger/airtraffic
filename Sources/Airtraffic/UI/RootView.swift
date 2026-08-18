@@ -341,13 +341,8 @@ private struct LaneColumn: View {
 
     @ViewBuilder
     private var headerBadge: some View {
-        if lane == .board {
-            if model.waitingCount > 0 {
-                countBadge(model.waitingCount, color: .orange)
-            }
-            if !model.candidates.isEmpty {
-                countBadge(model.candidates.count, color: .purple)
-            }
+        if lane == .board, model.waitingCount > 0 {
+            countBadge(model.waitingCount, color: .orange)
         }
     }
 

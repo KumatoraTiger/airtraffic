@@ -1,6 +1,6 @@
 import Foundation
 
-/// Persistent store for tasks, candidates, preferences, and scan cursors.
+/// Persistent store for tasks, preferences, and scan cursors.
 ///
 /// Sessions themselves are not the source of truth here — transcripts on disk are.
 /// The store keeps only what must survive across scans and app restarts.
@@ -41,24 +41,9 @@ public actor Store {
                 PRIMARY KEY (task_id, session_id)
             );
             """)
-        try db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS candidates (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                detail TEXT NOT NULL DEFAULT '',
-                confidence REAL NOT NULL,
-                session_id TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                excerpt TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at REAL NOT NULL,
-                reject_reason TEXT,
-                dedupe_key TEXT NOT NULL DEFAULT ''
-            );
-            """)
-        try Self.migrateCandidateDedupeKey(db)
-        try Self.migrateCandidateClosedAt(db)
+        // The LLM-proposal feature is gone; its leftover table goes with it.
+        // Proposals were ephemeral (72h expiry) and kept ones live on as tasks.
+        try db.execute("DROP TABLE IF EXISTS candidates")
         try Self.migrateTaskIsToday(db)
         try db.execute(
             """
@@ -86,47 +71,6 @@ public actor Store {
                 labeled_activity REAL NOT NULL
             );
             """)
-    }
-
-    /// Brings a pre-dedupe database up to date: adds the key column, backfills
-    /// it, collapses rows that were already inserted as duplicates, and locks
-    /// the column down with a unique index so no duplicate can be inserted again.
-    private static func migrateCandidateDedupeKey(_ db: SQLiteDatabase) throws {
-        let columns = try db.query("PRAGMA table_info(candidates)").map { $0.text("name") }
-        if !columns.contains("dedupe_key") {
-            try db.execute("ALTER TABLE candidates ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''")
-        }
-        // Backfilled in Swift, not SQL, so the key always matches TitleMatcher.
-        for row in try db.query("SELECT id, title FROM candidates WHERE dedupe_key = ''") {
-            try db.execute(
-                "UPDATE candidates SET dedupe_key = ? WHERE id = ?",
-                [.text(TitleMatcher.key(row.text("title"))), .text(row.text("id"))])
-        }
-        // One row survives per key: a row the user already acted on wins over a
-        // pending one, and the oldest wins among equals.
-        try db.execute(
-            """
-            DELETE FROM candidates WHERE rowid NOT IN (
-                SELECT rowid FROM (
-                    SELECT rowid, ROW_NUMBER() OVER (
-                        PARTITION BY dedupe_key
-                        ORDER BY (status = 'pending') ASC, created_at ASC
-                    ) AS position FROM candidates
-                ) WHERE position = 1
-            )
-            """)
-        try db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS candidates_dedupe_key ON candidates(dedupe_key)")
-    }
-
-    /// Adds the close timestamp used by the board's "recently disappeared"
-    /// section. Rows closed before the column existed get their creation time
-    /// as the best available estimate.
-    private static func migrateCandidateClosedAt(_ db: SQLiteDatabase) throws {
-        let columns = try db.query("PRAGMA table_info(candidates)").map { $0.text("name") }
-        guard !columns.contains("closed_at") else { return }
-        try db.execute("ALTER TABLE candidates ADD COLUMN closed_at REAL")
-        try db.execute("UPDATE candidates SET closed_at = created_at WHERE status != 'pending'")
     }
 
     /// Adds the today flag behind the board's 「今日やる」 section.
@@ -213,125 +157,6 @@ public actor Store {
                 "UPDATE tasks SET rank = ?, updated_at = ? WHERE id = ?",
                 [.int(Int64(index)), .real(Date().timeIntervalSince1970), .text(taskId)])
         }
-    }
-
-    // MARK: - Candidates
-
-    public func candidates(status: CandidateStatus? = .pending) throws -> [Candidate] {
-        let rows: [[String: SQLiteDatabase.Value]]
-        if let status {
-            rows = try db.query(
-                "SELECT * FROM candidates WHERE status = ? ORDER BY created_at DESC",
-                [.text(status.rawValue)])
-        } else {
-            rows = try db.query("SELECT * FROM candidates ORDER BY created_at DESC")
-        }
-        return rows.map(Self.candidate(from:))
-    }
-
-    /// Candidates that were rejected or expired, newest close first. These
-    /// feed the board's 完了 (expired) and キャンセル (rejected) sections,
-    /// where any of them can be reopened. Kept (accepted) candidates live on
-    /// as tasks and are excluded.
-    public func closedCandidates(limit: Int = 30) throws -> [Candidate] {
-        let rows = try db.query(
-            """
-            SELECT * FROM candidates WHERE status IN ('rejected', 'expired')
-            ORDER BY closed_at DESC LIMIT ?
-            """, [.int(Int64(limit))])
-        return rows.map(Self.candidate(from:))
-    }
-
-    private static func candidate(from row: [String: SQLiteDatabase.Value]) -> Candidate {
-        Candidate(
-            id: row.text("id"),
-            title: row.text("title"),
-            detail: row.text("detail"),
-            confidence: row.real("confidence"),
-            sessionId: row.text("session_id"),
-            agent: AgentKind(rawValue: row.text("agent")) ?? .claudeCode,
-            excerpt: row.text("excerpt"),
-            status: CandidateStatus(rawValue: row.text("status")) ?? .pending,
-            createdAt: Date(timeIntervalSince1970: row.real("created_at")),
-            rejectReason: row.textOrNil("reject_reason"),
-            closedAt: row.realOrNil("closed_at").map(Date.init(timeIntervalSince1970:))
-        )
-    }
-
-    /// Inserts a candidate unless one with the same normalized title already
-    /// exists in any state. Returns false when the insert was dropped as a
-    /// duplicate — this is the last line of defense behind the extractor's own
-    /// fuzzy filter, and the only one that survives an app restart.
-    @discardableResult
-    public func insertCandidate(_ candidate: Candidate) throws -> Bool {
-        try db.execute(
-            """
-            INSERT OR IGNORE INTO candidates
-                (id, title, detail, confidence, session_id, agent, excerpt, status, created_at,
-                 reject_reason, dedupe_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                .text(candidate.id), .text(candidate.title), .text(candidate.detail),
-                .real(candidate.confidence), .text(candidate.sessionId), .text(candidate.agent.rawValue),
-                .text(candidate.excerpt), .text(candidate.status.rawValue),
-                .real(candidate.createdAt.timeIntervalSince1970),
-                candidate.rejectReason.map { .text($0) } ?? .null,
-                .text(TitleMatcher.key(candidate.title)),
-            ])
-        return db.changes > 0
-    }
-
-    public func setCandidateStatus(
-        _ id: String, _ status: CandidateStatus, rejectReason: String? = nil, now: Date = Date()
-    ) throws {
-        try db.execute(
-            "UPDATE candidates SET status = ?, reject_reason = ?, closed_at = ? WHERE id = ?",
-            [
-                .text(status.rawValue), rejectReason.map { .text($0) } ?? .null,
-                status == .pending ? .null : .real(now.timeIntervalSince1970), .text(id),
-            ])
-    }
-
-    /// Puts a rejected or expired candidate back on the board. The creation
-    /// time is reset so the reopened candidate does not expire again on the
-    /// next sweep.
-    public func reopenCandidate(_ id: String, now: Date = Date()) throws {
-        try db.execute(
-            """
-            UPDATE candidates SET status = 'pending', reject_reason = NULL, closed_at = NULL,
-                created_at = ? WHERE id = ?
-            """, [.real(now.timeIntervalSince1970), .text(id)])
-    }
-
-    /// Titles of every candidate ever seen, whatever its state. Accepted,
-    /// rejected, and expired candidates all belong here: re-proposing something
-    /// the user has already dealt with is exactly what makes the board noisy.
-    public func knownCandidateTitles(limit: Int = 300) throws -> [String] {
-        let rows = try db.query(
-            "SELECT title FROM candidates ORDER BY created_at DESC LIMIT ?", [.int(Int64(limit))])
-        return rows.map { $0.text("title") }
-    }
-
-    /// Titles the user has rejected before; used as negative examples in extraction prompts.
-    public func rejectedTitles(limit: Int = 30) throws -> [String] {
-        let rows = try db.query(
-            """
-            SELECT title FROM candidates WHERE status = 'rejected'
-            ORDER BY created_at DESC LIMIT ?
-            """, [.int(Int64(limit))])
-        return rows.map { $0.text("title") }
-    }
-
-    /// Expires pending candidates older than the given age.
-    public func expireCandidates(olderThan age: TimeInterval, now: Date = Date()) throws {
-        let threshold = now.timeIntervalSince1970 - age
-        try db.execute(
-            """
-            UPDATE candidates SET status = 'expired', closed_at = ?
-            WHERE status = 'pending' AND created_at < ?
-            """,
-            [.real(now.timeIntervalSince1970), .real(threshold)])
     }
 
     // MARK: - Work labels

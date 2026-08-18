@@ -15,8 +15,6 @@ public final class GrokAdapter: AgentAdapter {
         var offset: UInt64 = 0
         var lastUserText = ""
         var lastAssistantText = ""
-        var newText = ""
-        var primed = false
     }
 
     public init(
@@ -88,20 +86,15 @@ public final class GrokAdapter: AgentAdapter {
         else { return nil }
 
         let state = states[dir.path] ?? State()
-        let isFirstParse = !state.primed
         let historyURL = dir.appendingPathComponent("chat_history.jsonl")
         if let (lines, newOffset) = try? FileTail.readNewLines(url: historyURL, from: state.offset) {
             state.offset = newOffset
             for line in lines {
                 guard let object = JSONLine.parse(line) else { continue }
-                ingest(object, into: state, collectText: !isFirstParse)
+                ingest(object, into: state)
             }
         }
-        state.primed = true
         states[dir.path] = state
-
-        let newText = state.newText
-        state.newText = ""
 
         let isLive = liveSessionIds.contains(sessionId)
         let status: SessionStatus
@@ -131,12 +124,11 @@ public final class GrokAdapter: AgentAdapter {
             filePath: dir.path,
             todos: [],
             lastUserText: state.lastUserText,
-            lastAssistantText: lastTurnSummary.isEmpty ? state.lastAssistantText : lastTurnSummary,
-            newTranscriptText: newText
+            lastAssistantText: lastTurnSummary.isEmpty ? state.lastAssistantText : lastTurnSummary
         )
     }
 
-    private func ingest(_ object: [String: Any], into state: State, collectText: Bool) {
+    private func ingest(_ object: [String: Any], into state: State) {
         let text: String
         if let string = object["content"] as? String {
             text = string
@@ -149,10 +141,8 @@ public final class GrokAdapter: AgentAdapter {
         switch object["type"] as? String {
         case "user":
             state.lastUserText = text
-            if collectText { state.newText += "[user] \(text)\n" }
         case "assistant":
             state.lastAssistantText = text
-            if collectText { state.newText += "[assistant] \(text)\n" }
         default:
             break
         }

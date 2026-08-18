@@ -10,10 +10,6 @@ gives you:
 - **管制 (Sessions)** — every recent session across agents, with sessions that
   need your attention (permission prompts, input waits) pinned to the top.
   A menu bar badge shows how many sessions are blocked on you.
-- **Inbox** — an LLM watches new transcript text and files *task candidates*
-  ("fix this later", deferred work, agreed follow-ups). Candidates are never
-  auto-promoted: you approve or reject them, and rejections become negative
-  examples that improve future extraction.
 - **タスク (Tasks)** — one task list across all sessions, linked back to the
   sessions they came from. In-session todo lists (TodoWrite / update_plan) can
   be promoted into it.
@@ -51,7 +47,7 @@ open dist/Airtraffic.app
 cp -R dist/Airtraffic.app /Applications/
 ```
 
-Tasks and candidates live in `~/Library/Application Support/Airtraffic`, and API
+Tasks live in `~/Library/Application Support/Airtraffic`, and API
 keys in the Keychain — neither is inside the bundle, so replacing the app on a
 later `make bundle` keeps your data.
 
@@ -63,7 +59,7 @@ make test   # run the test suite
 ```
 
 Then open 設定 (Settings) in the app, pick an LLM provider, paste an API key,
-and optionally enable LLM task extraction (off by default).
+and optionally enable LLM work labels (off by default).
 
 ## Development
 
