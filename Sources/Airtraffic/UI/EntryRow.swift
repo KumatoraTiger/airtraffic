@@ -6,7 +6,7 @@ import SwiftUI
 /// trailing decoration that appears only while something is actually running.
 /// Its linked sessions hang under it as a tree, newest first, three at most —
 /// and stay there until the task itself is done. Auto-materialized entries
-/// lead with their status symbol and carry 「残す」 (promote to a task) and
+/// lead with their status symbol and carry 「タスクにする」 (promote to a task) and
 /// 「紐づけ」 (attach to an existing task). Tapping expands the detail and
 /// the attached executions, whose todos can be promoted into persistent tasks.
 struct EntryRow: View {
@@ -72,12 +72,12 @@ struct EntryRow: View {
                 if let task = entry.task {
                     sourceBadge(task)
                 } else {
-                    Button("残す") {
+                    Button("タスクにする") {
                         Task { await model.keepEntry(entry) }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("タスクとして残す（セッションが終わっても消えなくなります）")
+                    .help("タスクにする（セッションが終わっても消えなくなります）")
                     linkMenu
                 }
             }
@@ -280,7 +280,7 @@ private struct SessionDetail: View {
                         .foregroundStyle(todo.status == .completed ? .green : .secondary)
                     Text(todo.content).font(.caption)
                     Spacer()
-                    Button("タスクに昇格") {
+                    Button("タスクにする") {
                         Task { await model.promoteTodo(todo, from: session) }
                     }
                     .buttonStyle(.link)

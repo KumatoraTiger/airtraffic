@@ -61,7 +61,7 @@ struct BoardView: View {
     }
 
     /// Taskless activity that aged past the 24-hour window: treated as
-    /// finished, still revertable via 「残す」.
+    /// finished, still revertable via 「タスクにする」.
     private var agedOut: [BoardEntry] {
         model.boardEntries.filter { $0.task == nil && !$0.isRecent() }
     }
@@ -152,7 +152,7 @@ struct BoardView: View {
     }
 
     /// Finished work, brought back with one click: done tasks (their sessions
-    /// still attached) via the checkmark, aged-out activity via 「残す」,
+    /// still attached) via the checkmark, aged-out activity via 「タスクにする」,
     /// expired proposals via 「戻す」.
     @ViewBuilder
     private var doneSection: some View {
@@ -241,12 +241,12 @@ struct ProposalRow: View {
                     .lineLimit(expanded ? nil : 1)
                 Spacer()
                 confidenceBadge
-                Button("残す") {
+                Button("タスクにする") {
                     Task { await model.keep(candidate) }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("タスクとして残す（残さなければ数日で自動的に消えます）")
+                .help("タスクにする（しなければ数日で自動的に消えます）")
                 rejectMenu
             }
             if expanded {
