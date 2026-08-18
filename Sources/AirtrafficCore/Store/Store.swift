@@ -59,6 +59,7 @@ public actor Store {
             """)
         try Self.migrateCandidateDedupeKey(db)
         try Self.migrateCandidateClosedAt(db)
+        try Self.migrateTaskIsToday(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -128,6 +129,13 @@ public actor Store {
         try db.execute("UPDATE candidates SET closed_at = created_at WHERE status != 'pending'")
     }
 
+    /// Adds the today flag behind the board's 「今日やる」 section.
+    private static func migrateTaskIsToday(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
+        guard !columns.contains("is_today") else { return }
+        try db.execute("ALTER TABLE tasks ADD COLUMN is_today INTEGER NOT NULL DEFAULT 0")
+    }
+
     // MARK: - Cursors
 
     /// Byte offset up to which a transcript file has been parsed.
@@ -165,6 +173,7 @@ public actor Store {
                 detail: row.text("detail"),
                 status: TaskStatus(rawValue: row.text("status")) ?? .todo,
                 rank: row.intOrNil("rank").map(Int.init),
+                isToday: row.int("is_today") != 0,
                 source: TaskSource(rawValue: row.text("source")) ?? .manual,
                 createdAt: Date(timeIntervalSince1970: row.real("created_at")),
                 updatedAt: Date(timeIntervalSince1970: row.real("updated_at")),
@@ -176,15 +185,16 @@ public actor Store {
     public func upsertTask(_ task: TaskItem) throws {
         try db.execute(
             """
-            INSERT INTO tasks (id, title, detail, status, rank, source, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (id, title, detail, status, rank, is_today, source, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title, detail = excluded.detail, status = excluded.status,
-                rank = excluded.rank, updated_at = excluded.updated_at
+                rank = excluded.rank, is_today = excluded.is_today, updated_at = excluded.updated_at
             """,
             [
                 .text(task.id), .text(task.title), .text(task.detail), .text(task.status.rawValue),
                 task.rank.map { .int(Int64($0)) } ?? .null,
+                .int(task.isToday ? 1 : 0),
                 .text(task.source.rawValue),
                 .real(task.createdAt.timeIntervalSince1970),
                 .real(task.updatedAt.timeIntervalSince1970),

@@ -5,7 +5,9 @@ import SwiftUI
 /// attached. Session status only paints badges on rows; it never moves a row
 /// between sections. Sections, in the order the user should spend attention:
 ///
-/// - タスク: the priority list itself — every open task, in rank order,
+/// - 今日やる: the tasks the user picked for today's focus; they stay here
+///   until taken off by hand
+/// - タスク: the priority list itself — every other open task, in rank order,
 ///   with its linked sessions hanging under it as a tree
 /// - 提案: LLM-extracted candidates; optional, expire untouched
 /// - タスク外の動き: agent activity matching no task, active within 24 hours
@@ -30,7 +32,7 @@ struct BoardView: View {
                     systemImage: "airplane.departure",
                     description: Text("coding agent のセッションが動き出すと、ここに映ります"))
             }
-            taskSection
+            todayAndTaskSection
             proposalSection
             entrySection(
                 activity, title: "タスク外の動き", symbol: "antenna.radiowaves.left.and.right",
@@ -42,13 +44,22 @@ struct BoardView: View {
 
     // MARK: - Row selection
 
-    /// The priority list: every open task in rank order (as the store returns
-    /// them). Waiting or running executions are badges on the row, never a
-    /// reason to move it.
+    /// Today's picks, in rank order. Same rows as the main list, just lifted
+    /// above it while their flag is on.
+    private var todayEntries: [BoardEntry] {
+        model.boardEntries.filter { entry in
+            guard let task = entry.task else { return false }
+            return task.status != .done && task.isToday
+        }
+    }
+
+    /// The priority list: every open task not picked for today, in rank order
+    /// (as the store returns them). Waiting or running executions are badges
+    /// on the row, never a reason to move it.
     private var taskEntries: [BoardEntry] {
         model.boardEntries.filter { entry in
             guard let task = entry.task else { return false }
-            return task.status != .done
+            return task.status != .done && !task.isToday
         }
     }
 
@@ -122,15 +133,27 @@ struct BoardView: View {
         }
     }
 
-    private var taskSection: some View {
+    /// 今日やる and タスク as one continuous, reorderable list. macOS's List
+    /// starts row drags only through onMove, and an onMove drag cannot leave
+    /// its own ForEach — so the two "sections" live in a single ForEach with a
+    /// fixed divider row between them, and crossing the divider is what moves
+    /// a task in or out of today.
+    private var todayAndTaskSection: some View {
         Section {
-            ForEach(taskEntries) { entry in
-                EntryRow(entry: entry)
+            if todayEntries.isEmpty {
+                Text("タスクを「タスク」見出しの上へドラッグ（行の太陽ボタンでも入ります）")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
-            .onMove { indices, offset in
-                let ids = taskEntries.compactMap { $0.task?.id }
-                Task { await model.moveTask(in: ids, fromOffsets: indices, toOffset: offset) }
+            ForEach(boardRows) { row in
+                switch row {
+                case .entry(let entry):
+                    EntryRow(entry: entry)
+                case .divider:
+                    taskDivider.moveDisabled(true)
+                }
             }
+            .onMove(perform: moveBoardRow)
             HStack {
                 TextField("タスクを追加…", text: $newTitle)
                     .textFieldStyle(.roundedBorder)
@@ -141,14 +164,28 @@ struct BoardView: View {
             .padding(.vertical, 2)
         } header: {
             HStack {
-                Label("タスク (\(taskEntries.count))", systemImage: "checklist")
-                    .foregroundStyle(.blue)
+                Label("今日やる (\(todayEntries.count))", systemImage: "sun.max.fill")
+                    .foregroundStyle(.orange)
                 Spacer()
-                Text("上が高優先・ドラッグで並べ替え")
+                Text("ドラッグで並べ替え・「タスク」見出しをまたいで移動")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The fixed boundary row between today's picks and the rest.
+    private var taskDivider: some View {
+        HStack {
+            Label("タスク (\(taskEntries.count))", systemImage: "checklist")
+                .font(.callout.bold())
+                .foregroundStyle(.blue)
+            Spacer()
+            Text("上が高優先")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.top, 6)
     }
 
     /// Finished work, brought back with one click: done tasks (their sessions
@@ -210,6 +247,56 @@ struct BoardView: View {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Drag & drop between 今日やる and タスク
+
+    /// One row per open task plus the divider, in display order.
+    private enum BoardRow: Identifiable {
+        case entry(BoardEntry)
+        case divider
+
+        var id: String {
+            switch self {
+            case .entry(let entry): return entry.id
+            case .divider: return "today-task-divider"
+            }
+        }
+    }
+
+    private var boardRows: [BoardRow] {
+        todayEntries.map(BoardRow.entry) + [.divider] + taskEntries.map(BoardRow.entry)
+    }
+
+    /// A drag ended: replay the move on the combined row list and read the
+    /// divider's position back off it. Rows above the divider are today's
+    /// picks, rows below are the backlog, and the whole order becomes the
+    /// new ranking.
+    private func moveBoardRow(fromOffsets: IndexSet, toOffset: Int) {
+        var rows = boardRows
+        var movedId: String?
+        var movedUp: Bool?
+        if let from = fromOffsets.first, case .entry(let entry) = rows[from] {
+            movedId = entry.task?.id
+            movedUp = toOffset <= from
+        }
+        rows.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        var todayIds: [String] = []
+        var laterIds: [String] = []
+        var seenDivider = false
+        for row in rows {
+            switch row {
+            case .divider:
+                seenDivider = true
+            case .entry(let entry):
+                guard let id = entry.task?.id else { continue }
+                if seenDivider { laterIds.append(id) } else { todayIds.append(id) }
+            }
+        }
+        Task {
+            await model.applyBoardOrder(
+                todayIds: todayIds, laterIds: laterIds, movedId: movedId, movedUp: movedUp)
+        }
     }
 
     private func submit() {

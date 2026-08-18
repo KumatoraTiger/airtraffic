@@ -39,6 +39,25 @@ struct StoreTests {
             expectEqual(fetched.map(\.id), ["t-2", "t-1"])
         }
 
+        await TestKit.shared.run("store: today flag roundtrip") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            var task = TaskItem(
+                id: "t-1", title: "write docs", detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: []
+            )
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.isToday, false)
+
+            task.isToday = true
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.isToday, true)
+
+            task.isToday = false
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.isToday, false)
+        }
+
         await TestKit.shared.run("store: work labels roundtrip and prune") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

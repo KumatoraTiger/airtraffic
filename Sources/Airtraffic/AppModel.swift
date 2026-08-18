@@ -279,6 +279,48 @@ final class AppModel {
         await refreshLists()
     }
 
+    /// Puts a task into (or takes it out of) the 「今日やる」 section. The flag
+    /// sticks across days until the user flips it back.
+    func setTaskToday(_ task: TaskItem, _ isToday: Bool) async {
+        guard let store else { return }
+        var updated = task
+        updated.isToday = isToday
+        updated.updatedAt = Date()
+        try? await store.upsertTask(updated)
+        await refreshLists()
+    }
+
+    /// A board drag ended: `todayIds` are the rows that landed above the
+    /// タスク divider, `laterIds` the rows below, both in display order.
+    /// Today flags follow the divider, and the combined order is the ranking.
+    /// The move is recorded as a preference so future AI proposals learn
+    /// from it: crossing the divider beats a plain reorder as the signal.
+    func applyBoardOrder(
+        todayIds: [String], laterIds: [String], movedId: String? = nil, movedUp: Bool? = nil
+    ) async {
+        guard let store else { return }
+        if let movedId, let moved = tasks.first(where: { $0.id == movedId }) {
+            let becameToday = todayIds.contains(movedId)
+            if moved.isToday != becameToday {
+                try? await store.insertPreference(
+                    "ユーザーは「\(moved.title)」を今日やる\(becameToday ? "に入れた" : "から外した")")
+            } else if let movedUp {
+                try? await store.insertPreference(
+                    "ユーザーは「\(moved.title)」の優先度を手動で\(movedUp ? "上げた" : "下げた")")
+            }
+        }
+        for (ids, isToday) in [(todayIds, true), (laterIds, false)] {
+            for task in tasks where ids.contains(task.id) && task.isToday != isToday {
+                var updated = task
+                updated.isToday = isToday
+                updated.updatedAt = Date()
+                try? await store.upsertTask(updated)
+            }
+        }
+        try? await store.setRanks(todayIds + laterIds)
+        await refreshLists()
+    }
+
     func setTaskStatus(_ task: TaskItem, _ status: TaskStatus) async {
         guard let store else { return }
         var updated = task
@@ -324,25 +366,6 @@ final class AppModel {
             source: .deterministic, createdAt: Date(), updatedAt: Date(),
             sessionIds: [session.id])
         try? await store.upsertTask(task)
-        await refreshLists()
-    }
-
-    /// Manual reorder of the tasks visible in one list. Offsets are relative
-    /// to `visibleIds` (the list the user actually dragged in), not to the
-    /// full task array. The move itself is recorded as a preference so future
-    /// AI proposals learn from it.
-    func moveTask(in visibleIds: [String], fromOffsets: IndexSet, toOffset: Int) async {
-        guard let store else { return }
-        var reordered = visibleIds
-        reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
-        try? await store.setRanks(reordered)
-        if let index = fromOffsets.first, index < visibleIds.count,
-            let moved = tasks.first(where: { $0.id == visibleIds[index] })
-        {
-            let direction = toOffset <= index ? "上げた" : "下げた"
-            try? await store.insertPreference(
-                "ユーザーは「\(moved.title)」の優先度を手動で\(direction)")
-        }
         await refreshLists()
     }
 

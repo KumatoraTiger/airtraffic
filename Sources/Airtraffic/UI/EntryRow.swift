@@ -46,6 +46,19 @@ struct EntryRow: View {
                     .fontWeight(.medium)
                     .strikethrough(entry.task?.status == .done)
                     .lineLimit(1)
+                // Expansion lives on this chevron, not on the whole row: any
+                // tap gesture on the row surface (even a simultaneous one)
+                // keeps NSTableView from ever starting a row drag, which
+                // silently kills both reorder and cross-section drops.
+                Button {
+                    withAnimation { expanded.toggle() }
+                } label: {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "折りたたむ" : "詳細を表示")
                 Spacer()
                 if let project = entry.sessions.first?.projectName {
                     Text(project)
@@ -70,6 +83,9 @@ struct EntryRow: View {
                     statusBadge(status)
                 }
                 if let task = entry.task {
+                    if task.status != .done {
+                        todayToggle(task)
+                    }
                     sourceBadge(task)
                 } else {
                     Button("タスクにする") {
@@ -109,14 +125,15 @@ struct EntryRow: View {
             }
         }
         .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .onTapGesture { withAnimation { expanded.toggle() } }
         .contextMenu {
             if let task = entry.task {
                 if task.status == .done {
                     Button("未完了に戻す") { Task { await model.setTaskStatus(task, .todo) } }
                 } else {
                     Button("完了にする") { Task { await model.setTaskStatus(task, .done) } }
+                    Button(task.isToday ? "今日やるから外す" : "今日やるに入れる") {
+                        Task { await model.setTaskToday(task, !task.isToday) }
+                    }
                 }
                 Button("アーカイブ") { Task { await model.setTaskStatus(task, .archived) } }
             }
@@ -202,6 +219,20 @@ struct EntryRow: View {
                 .foregroundStyle(.secondary)
                 .help("todo の進捗")
         }
+    }
+
+    /// In and out of the 「今日やる」 section with one click. Filled sun while
+    /// the task is in; the flag never expires on its own.
+    private func todayToggle(_ task: TaskItem) -> some View {
+        Button {
+            Task { await model.setTaskToday(task, !task.isToday) }
+        } label: {
+            Image(systemName: task.isToday ? "sun.max.fill" : "sun.max")
+                .font(.caption)
+                .foregroundStyle(task.isToday ? .orange : .secondary)
+        }
+        .buttonStyle(.plain)
+        .help(task.isToday ? "今日やるから外す" : "今日やるに入れる")
     }
 
     private func sourceBadge(_ task: TaskItem) -> some View {

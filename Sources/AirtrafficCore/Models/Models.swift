@@ -145,6 +145,9 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     public var status: TaskStatus
     /// Lower rank means higher priority. Nil means unranked.
     public var rank: Int?
+    /// Picked for today's focus. Sticks until the user takes it off; the board
+    /// shows these in their own section above the main list.
+    public var isToday: Bool
     public var source: TaskSource
     public var createdAt: Date
     public var updatedAt: Date
@@ -152,13 +155,15 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
 
     public init(
         id: String, title: String, detail: String, status: TaskStatus, rank: Int?,
-        source: TaskSource, createdAt: Date, updatedAt: Date, sessionIds: [String]
+        isToday: Bool = false, source: TaskSource, createdAt: Date, updatedAt: Date,
+        sessionIds: [String]
     ) {
         self.id = id
         self.title = title
         self.detail = detail
         self.status = status
         self.rank = rank
+        self.isToday = isToday
         self.source = source
         self.createdAt = createdAt
         self.updatedAt = updatedAt
