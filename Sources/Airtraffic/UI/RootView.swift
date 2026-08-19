@@ -6,6 +6,9 @@ enum Lane: String, CaseIterable, Identifiable {
     /// proposals inline, and revertable 完了 / キャンセル trails.
     case board
     case chat
+    /// 今日のふりかえり: what got done so far today, openable at any point in
+    /// the day, with LLM-written 日報 generation on demand.
+    case report
 
     var id: String { rawValue }
 
@@ -13,6 +16,7 @@ enum Lane: String, CaseIterable, Identifiable {
         switch self {
         case .board: "管制"
         case .chat: "壁打ち"
+        case .report: "ふりかえり"
         }
     }
 
@@ -20,6 +24,7 @@ enum Lane: String, CaseIterable, Identifiable {
         switch self {
         case .board: "airplane"
         case .chat: "bubble.left.and.bubble.right"
+        case .report: "doc.text"
         }
     }
 
@@ -27,6 +32,7 @@ enum Lane: String, CaseIterable, Identifiable {
         switch self {
         case .board: 340
         case .chat: 300
+        case .report: 300
         }
     }
 
@@ -36,6 +42,7 @@ enum Lane: String, CaseIterable, Identifiable {
         switch self {
         case .board: .orange
         case .chat: .teal
+        case .report: .purple
         }
     }
 }
@@ -380,6 +387,7 @@ private struct LaneColumn: View {
         switch lane {
         case .board: BoardView()
         case .chat: ChatView()
+        case .report: ReportView()
         }
     }
 }

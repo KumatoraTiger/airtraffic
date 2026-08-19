@@ -58,6 +58,29 @@ struct StoreTests {
             expectEqual(try await store.tasks().first?.isToday, false)
         }
 
+        await TestKit.shared.run("store: completed_at roundtrip") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            var task = TaskItem(
+                id: "t-1", title: "write docs", detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: []
+            )
+            try await store.upsertTask(task)
+            expect(try await store.tasks().first?.completedAt == nil, "starts unset")
+
+            let finishedAt = Date(timeIntervalSince1970: 1_755_000_000)
+            task.status = .done
+            task.completedAt = finishedAt
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.completedAt, finishedAt)
+
+            // Reopening clears the timestamp.
+            task.status = .todo
+            task.completedAt = nil
+            try await store.upsertTask(task)
+            expect(try await store.tasks().first?.completedAt == nil, "cleared on reopen")
+        }
+
         await TestKit.shared.run("store: work labels roundtrip and prune") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

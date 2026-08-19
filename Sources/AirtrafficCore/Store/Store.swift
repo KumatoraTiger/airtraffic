@@ -45,6 +45,7 @@ public actor Store {
         // Proposals were ephemeral (72h expiry) and kept ones live on as tasks.
         try db.execute("DROP TABLE IF EXISTS candidates")
         try Self.migrateTaskIsToday(db)
+        try Self.migrateTaskCompletedAt(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -78,6 +79,14 @@ public actor Store {
         let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
         guard !columns.contains("is_today") else { return }
         try db.execute("ALTER TABLE tasks ADD COLUMN is_today INTEGER NOT NULL DEFAULT 0")
+    }
+
+    /// Records when a task entered `done`, so the daily report can tell
+    /// today's completions apart from tasks merely edited today.
+    private static func migrateTaskCompletedAt(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
+        guard !columns.contains("completed_at") else { return }
+        try db.execute("ALTER TABLE tasks ADD COLUMN completed_at REAL")
     }
 
     // MARK: - Cursors
@@ -121,6 +130,7 @@ public actor Store {
                 source: TaskSource(rawValue: row.text("source")) ?? .manual,
                 createdAt: Date(timeIntervalSince1970: row.real("created_at")),
                 updatedAt: Date(timeIntervalSince1970: row.real("updated_at")),
+                completedAt: row.realOrNil("completed_at").map(Date.init(timeIntervalSince1970:)),
                 sessionIds: sessionsByTask[row.text("id")] ?? []
             )
         }
@@ -129,11 +139,12 @@ public actor Store {
     public func upsertTask(_ task: TaskItem) throws {
         try db.execute(
             """
-            INSERT INTO tasks (id, title, detail, status, rank, is_today, source, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (id, title, detail, status, rank, is_today, source, created_at, updated_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title, detail = excluded.detail, status = excluded.status,
-                rank = excluded.rank, is_today = excluded.is_today, updated_at = excluded.updated_at
+                rank = excluded.rank, is_today = excluded.is_today, updated_at = excluded.updated_at,
+                completed_at = excluded.completed_at
             """,
             [
                 .text(task.id), .text(task.title), .text(task.detail), .text(task.status.rawValue),
@@ -142,6 +153,7 @@ public actor Store {
                 .text(task.source.rawValue),
                 .real(task.createdAt.timeIntervalSince1970),
                 .real(task.updatedAt.timeIntervalSince1970),
+                task.completedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
             ])
         for sessionId in task.sessionIds {
             try db.execute(

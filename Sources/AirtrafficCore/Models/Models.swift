@@ -148,12 +148,15 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     public var source: TaskSource
     public var createdAt: Date
     public var updatedAt: Date
+    /// When the task last entered `done`. Cleared if it is reopened, so the
+    /// daily report only counts work finished (and still finished) today.
+    public var completedAt: Date?
     public var sessionIds: [String]
 
     public init(
         id: String, title: String, detail: String, status: TaskStatus, rank: Int?,
         isToday: Bool = false, source: TaskSource, createdAt: Date, updatedAt: Date,
-        sessionIds: [String]
+        completedAt: Date? = nil, sessionIds: [String]
     ) {
         self.id = id
         self.title = title
@@ -164,6 +167,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         self.source = source
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.completedAt = completedAt
         self.sessionIds = sessionIds
     }
 }

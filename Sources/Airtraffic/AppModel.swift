@@ -24,6 +24,10 @@ final class AppModel {
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
+    /// The last generated daily report (Markdown). Not persisted: the report
+    /// is a snapshot of "now", regenerated on demand.
+    var reportText: String?
+    var reportBusy = false
     /// The running pomodoro, if any. Persisted so an in-flight timer survives
     /// an app restart; a timer that expired while the app was closed is
     /// dropped silently on launch.
@@ -82,6 +86,7 @@ final class AppModel {
     private let coordinator: IngestionCoordinator
     private let labeler = SessionLabeler()
     private let prioritizer = Prioritizer()
+    private let reporter = DailyReporter()
     private var scanTask: Task<Void, Never>?
     private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
@@ -254,6 +259,13 @@ final class AppModel {
         var updated = task
         updated.status = status
         updated.updatedAt = Date()
+        // The completion timestamp follows the done state: reopening clears
+        // it, so the daily report never counts a reopened task as finished.
+        if status == .done {
+            updated.completedAt = task.status == .done ? task.completedAt : Date()
+        } else {
+            updated.completedAt = nil
+        }
         try? await store.upsertTask(updated)
         await refreshLists()
     }
@@ -287,11 +299,13 @@ final class AppModel {
     /// Promote a session's in-transcript todo into a global task.
     func promoteTodo(_ todo: TodoItem, from session: SessionSnapshot) async {
         guard let store else { return }
+        let done = todo.status == .completed
         let task = TaskItem(
             id: UUID().uuidString, title: todo.content,
             detail: "セッション「\(session.title)」の todo から昇格",
-            status: todo.status == .completed ? .done : .todo, rank: nil,
+            status: done ? .done : .todo, rank: nil,
             source: .deterministic, createdAt: Date(), updatedAt: Date(),
+            completedAt: done ? Date() : nil,
             sessionIds: [session.id])
         try? await store.upsertTask(task)
         await refreshLists()
@@ -341,6 +355,44 @@ final class AppModel {
         guard let store else { return }
         tasks = (try? await store.tasks()) ?? []
         preferences = (try? await store.preferences()) ?? []
+    }
+
+    // MARK: - Daily report
+
+    /// Tasks finished today, earliest first — the ふりかえり lane's main list.
+    var completedToday: [TaskItem] {
+        reporter.completedToday(tasks)
+    }
+
+    /// Today's session activity, one row per distinct piece of work.
+    var activityToday: [DailyReporter.ActivityItem] {
+        reporter.activityToday(sessions: sessions, labels: labels)
+    }
+
+    /// 今日やる picks not finished yet — what the report calls 残っていること.
+    var remainingToday: [TaskItem] {
+        tasks.filter { $0.isToday && $0.status != .done && $0.status != .archived }
+    }
+
+    /// Generates the daily report for everything up to now. Mid-day runs are
+    /// fine: the prompt carries the current time so the report says so.
+    func generateDailyReport() async {
+        guard !reportBusy else { return }
+        reportBusy = true
+        defer { reportBusy = false }
+        do {
+            let client = try makeClient()
+            let input = reporter.reportInput(
+                completed: completedToday, activity: activityToday,
+                remainingToday: remainingToday)
+            reportText = try await client.complete(
+                LLMRequest(
+                    system: reporter.systemPrompt(),
+                    messages: [ChatMessage(role: .user, text: input)],
+                    maxTokens: 4096))
+        } catch {
+            lastError = "\(error)"
+        }
     }
 
     // MARK: - Prioritization chat

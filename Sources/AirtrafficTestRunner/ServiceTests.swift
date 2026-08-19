@@ -294,5 +294,74 @@ struct ServiceTests {
                 "plain reply should not produce a proposal")
             _ = prioritizer
         }
+
+        await TestKit.shared.run("reporter: completedToday keeps only tasks finished today") {
+            let reporter = DailyReporter()
+            let now = Date()
+            let yesterday = now.addingTimeInterval(-24 * 3600)
+            var doneToday = task(id: "t-1", title: "READMEを更新する", status: .done)
+            doneToday.completedAt = now.addingTimeInterval(-3600)
+            var doneEarlier = task(id: "t-2", title: "CIを直す", status: .done)
+            doneEarlier.completedAt = now.addingTimeInterval(-600)
+            var doneYesterday = task(id: "t-3", title: "古い作業", status: .done)
+            doneYesterday.completedAt = yesterday
+            // Completed before the timestamp existed: falls back to updatedAt.
+            var legacyDone = task(id: "t-4", title: "タイムスタンプなしの完了", status: .done)
+            legacyDone.updatedAt = now
+            let open = task(id: "t-5", title: "未完了の作業", status: .inProgress)
+
+            let completed = reporter.completedToday(
+                [doneEarlier, doneToday, doneYesterday, legacyDone, open], now: now)
+            expectEqual(completed.map(\.id), ["t-1", "t-2", "t-4"])
+        }
+
+        await TestKit.shared.run("reporter: activityToday merges by label and skips stale") {
+            let reporter = DailyReporter()
+            let now = Date()
+            let sessions = [
+                session(id: "claude:s-1", title: "認証APIの差分を見て", lastActivity: now),
+                session(
+                    id: "codex:s-2", title: "authのレビュー続き", agent: .codex,
+                    lastActivity: now.addingTimeInterval(-1800)),
+                session(
+                    id: "claude:s-3", title: "昨日の作業",
+                    lastActivity: now.addingTimeInterval(-24 * 3600)),
+                session(id: "claude:s-4", title: "ログ出力を整理する", lastActivity: now),
+            ]
+            let labels: [String: WorkLabel] = [
+                "claude:s-1": WorkLabel(
+                    sessionId: "claude:s-1", kind: .review, subject: "認証APIの差分",
+                    updatedAt: now, labeledActivity: now),
+                "codex:s-2": WorkLabel(
+                    sessionId: "codex:s-2", kind: .review, subject: "認証APIの差分",
+                    updatedAt: now, labeledActivity: now),
+            ]
+            let items = reporter.activityToday(sessions: sessions, labels: labels, now: now)
+            expectEqual(items.count, 2)
+            let review = try unwrap(items.first { $0.title == "レビュー: 認証APIの差分" })
+            expectEqual(Set(review.agents), Set([.claudeCode, .codex]))
+            expect(
+                items.contains { $0.title == "ログ出力を整理する" },
+                "an unlabeled session should fall back to its cleaned title")
+        }
+
+        await TestKit.shared.run("reporter: report input carries the day's facts") {
+            let reporter = DailyReporter()
+            let now = Date()
+            var done = task(id: "t-1", title: "READMEを更新する", status: .done)
+            done.completedAt = now
+            let input = reporter.reportInput(
+                completed: [done],
+                activity: [
+                    DailyReporter.ActivityItem(
+                        title: "レビュー: 認証APIの差分", agents: [.claudeCode], lastActivity: now)
+                ],
+                remainingToday: [task(id: "t-2", title: "CIを直す", status: .inProgress)],
+                now: now)
+            expect(input.contains("READMEを更新する"), "completed task should be listed")
+            expect(input.contains("レビュー: 認証APIの差分"), "activity should be listed")
+            expect(input.contains("CIを直す"), "remaining task should be listed")
+            expect(input.contains("現在時刻"), "the point-in-time context should be present")
+        }
     }
 }
