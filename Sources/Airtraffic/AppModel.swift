@@ -24,10 +24,31 @@ final class AppModel {
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
-    /// The last generated daily report (Markdown). Not persisted: the report
-    /// is a snapshot of "now", regenerated on demand.
-    var reportText: String?
+    /// The last generated daily report. Not persisted: the report is a
+    /// snapshot of "now", regenerated on demand.
+    var report: DailyReport?
+    /// The model's raw reply when it could not be read as a report. Shown as
+    /// plain text so a malformed answer never looks like an empty day.
+    var reportFallback: String?
     var reportBusy = false
+
+    var hasReport: Bool { report != nil || reportFallback != nil }
+
+    /// Figures for the report, computed from the same facts the LLM was given.
+    /// Kept from the generating pass: recomputing later would redraw the day
+    /// under a report that describes an earlier moment.
+    private(set) var reportMetrics: DayMetrics?
+
+    /// The report as a standalone page, for the web view and for saving.
+    var reportHTML: String? {
+        report.map { DailyReportRenderer.html($0, metrics: reportMetrics) }
+    }
+
+    /// The report as Markdown, for pasting into a document or a chat.
+    var reportMarkdown: String? {
+        if let report { return DailyReportRenderer.markdown(report) }
+        return reportFallback
+    }
     /// The running pomodoro, if any. Persisted so an in-flight timer survives
     /// an app restart; a timer that expired while the app was closed is
     /// dropped silently on launch.
@@ -95,6 +116,7 @@ final class AppModel {
     private let labeler = SessionLabeler()
     private let prioritizer = Prioritizer()
     private let reporter = DailyReporter()
+    private let gitLog = GitLog()
     private var scanTask: Task<Void, Never>?
     private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
@@ -404,14 +426,33 @@ final class AppModel {
         defer { reportBusy = false }
         do {
             let client = try makeClient()
+            let activity = activityToday
+            let plan = reporter.comparePlan(
+                tasks: tasks, activity: activity, sessions: sessions, labels: labels)
+            // Reading commits shells out to git once per repository, so it
+            // runs off the main actor while the report is being prepared.
+            let repoPaths = Set(
+                sessions.filter { !$0.isSubagent && !$0.cwd.isEmpty }.map(\.cwd))
+            let log = gitLog
+            let commits = await Task.detached {
+                log.commitsToday(paths: Array(repoPaths))
+            }.value
             let input = reporter.reportInput(
-                completed: completedToday, activity: activityToday,
-                remainingToday: remainingToday)
-            reportText = try await client.complete(
+                completed: completedToday, plan: plan, commits: commits)
+            let reply = try await client.complete(
                 LLMRequest(
                     system: reporter.systemPrompt(),
                     messages: [ChatMessage(role: .user, text: input)],
                     maxTokens: 4096))
+            if let parsed = reporter.parseReport(from: reply) {
+                report = parsed
+                reportMetrics = DayMetrics.build(plan: plan, commits: commits)
+                reportFallback = nil
+            } else {
+                report = nil
+                reportMetrics = nil
+                reportFallback = reply
+            }
         } catch {
             lastError = "\(error)"
         }

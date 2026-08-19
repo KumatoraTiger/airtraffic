@@ -14,20 +14,22 @@ struct ServiceTests {
     private func session(
         id: String, title: String, cwd: String = "/Users/alex/src/demo",
         agent: AgentKind = .claudeCode, status: SessionStatus = .running,
-        lastActivity: Date = Date()
+        lastActivity: Date = Date(), todos: [TodoItem] = [],
+        lastAssistantText: String = ""
     ) -> SessionSnapshot {
         SessionSnapshot(
             id: id, agent: agent, cwd: cwd, title: title, status: status,
             lastActivity: lastActivity, isSubagent: false, filePath: "/tmp/\(id).jsonl",
-            todos: [], lastUserText: "", lastAssistantText: "")
+            todos: todos, lastUserText: "", lastAssistantText: lastAssistantText)
     }
 
     private func task(
-        id: String, title: String, sessionIds: [String] = [], status: TaskStatus = .todo
+        id: String, title: String, sessionIds: [String] = [], status: TaskStatus = .todo,
+        isToday: Bool = false
     ) -> TaskItem {
         TaskItem(
-            id: id, title: title, detail: "", status: status, rank: nil, source: .manual,
-            createdAt: Date(), updatedAt: Date(), sessionIds: sessionIds)
+            id: id, title: title, detail: "", status: status, rank: nil, isToday: isToday,
+            source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: sessionIds)
     }
 
     func runAll() async {
@@ -340,28 +342,332 @@ struct ServiceTests {
             expectEqual(items.count, 2)
             let review = try unwrap(items.first { $0.title == "レビュー: 認証APIの差分" })
             expectEqual(Set(review.agents), Set([.claudeCode, .codex]))
+            expectEqual(review.sessionCount, 2)
             expect(
                 items.contains { $0.title == "ログ出力を整理する" },
                 "an unlabeled session should fall back to its cleaned title")
         }
 
+        await TestKit.shared.run("reporter: activityToday merges differently worded work on one PR") {
+            let reporter = DailyReporter()
+            let now = Date()
+            let sessions = [
+                session(
+                    id: "claude:s-1", title: "PR #123 を見る",
+                    lastActivity: now.addingTimeInterval(-7200)),
+                session(
+                    id: "codex:s-2", title: "認証API移行の続き", agent: .codex,
+                    status: .waitingInput, lastActivity: now.addingTimeInterval(-3600),
+                    todos: [
+                        TodoItem(content: "baselineを直す", status: .pending),
+                        TodoItem(content: "レビュー返信", status: .completed),
+                    ],
+                    lastAssistantText: "指摘3件を反映しました。"),
+                session(
+                    id: "claude:s-3", title: "同じPRのライブレビュー", lastActivity: now),
+            ]
+            let labels: [String: WorkLabel] = [
+                "claude:s-1": WorkLabel(
+                    sessionId: "claude:s-1", kind: .review, subject: "PR #123 同期DBの移行",
+                    updatedAt: now, labeledActivity: now),
+                "codex:s-2": WorkLabel(
+                    sessionId: "codex:s-2", kind: .implement, subject: "#123 認証API移行",
+                    updatedAt: now, labeledActivity: now),
+                "claude:s-3": WorkLabel(
+                    sessionId: "claude:s-3", kind: .review, subject: "PR 123 のライブレビュー",
+                    updatedAt: now, labeledActivity: now),
+            ]
+            let items = reporter.activityToday(sessions: sessions, labels: labels, now: now)
+            expectEqual(items.count, 1)
+            let item = try unwrap(items.first)
+            expectEqual(item.sessionCount, 3)
+            expectEqual(item.state, .running)
+            expectEqual(item.openTodos, ["baselineを直す"])
+            expect(
+                item.title == "レビュー: PR 123 のライブレビュー",
+                "the newest session should name the merged work")
+            expect(item.lastActivity > item.firstActivity, "the group should span the day")
+            expect(
+                item.lastOutput.contains("指摘3件"),
+                "the newest non-empty assistant output should be carried")
+        }
+
+        await TestKit.shared.run("reporter: waiting sessions are not reported as running") {
+            let reporter = DailyReporter()
+            let now = Date()
+            let sessions = [
+                session(
+                    id: "claude:s-1", title: "承認待ちの作業", status: .waitingApproval,
+                    lastActivity: now.addingTimeInterval(-4 * 3600)),
+                session(id: "claude:s-2", title: "動いている作業", lastActivity: now),
+                session(
+                    id: "claude:s-3", title: "止まった作業", status: .idle,
+                    lastActivity: now.addingTimeInterval(-6 * 3600)),
+                // Placeholder titles name no work at all.
+                session(id: "claude:s-4", title: "(無題)", lastActivity: now),
+            ]
+            let items = reporter.activityToday(sessions: sessions, labels: [:], now: now)
+            expectEqual(items.map(\.state), [.running, .awaitingUser, .quiet])
+            expect(
+                !items.contains { $0.title.contains("無題") },
+                "a placeholder title should be skipped")
+
+            let input = reporter.reportInput(
+                completed: [], plan: DailyReporter.PlanComparison(unplanned: items), now: now)
+            expect(input.contains("確認待ち"), "the ambiguous state should be named")
+            expect(
+                input.contains("完了済みか放置かは不明"),
+                "the report input should not claim a waiting session is in progress")
+            expect(input.contains("4時間前から"), "how long it has been sitting should be stated")
+        }
+
+        await TestKit.shared.run("reporter: plan comparison splits planned, untouched, unplanned") {
+            let reporter = DailyReporter()
+            let now = Date()
+            let sessions = [
+                session(id: "claude:s-1", title: "READMEを更新する", lastActivity: now),
+                session(id: "claude:s-2", title: "PR #123 のレビュー", lastActivity: now),
+            ]
+            let items = reporter.activityToday(sessions: sessions, labels: [:], now: now)
+            var done = task(id: "t-1", title: "READMEを更新する", status: .done, isToday: true)
+            done.completedAt = now
+            let planned = task(id: "t-2", title: "CIを直す", status: .todo, isToday: true)
+            let someday = task(id: "t-3", title: "いつかやる整理", status: .todo)
+
+            let plan = reporter.comparePlan(
+                tasks: [done, planned, someday], activity: items, sessions: sessions, now: now)
+            expectEqual(plan.worked.map(\.task.id), ["t-1"])
+            expectEqual(plan.untouched.map(\.id), ["t-2"])
+            expect(
+                plan.unplanned.contains { $0.title.contains("123") },
+                "work with no task behind it should be reported as unplanned")
+            expect(
+                !plan.unplanned.contains { $0.title.contains("README") },
+                "work matched to a task should not also be unplanned")
+        }
+
         await TestKit.shared.run("reporter: report input carries the day's facts") {
             let reporter = DailyReporter()
             let now = Date()
-            var done = task(id: "t-1", title: "READMEを更新する", status: .done)
+            var done = task(id: "t-1", title: "READMEを更新する", status: .done, isToday: true)
             done.completedAt = now
-            let input = reporter.reportInput(
-                completed: [done],
-                activity: [
+            let item = DailyReporter.ActivityItem(
+                id: "#1", title: "レビュー: 認証APIの差分", project: "demo",
+                agents: [.claudeCode], kinds: [.review], sessionCount: 2,
+                state: .running, firstActivity: now.addingTimeInterval(-3600),
+                lastActivity: now, openTodos: ["テストを直す"],
+                lastOutput: "差分を読み終えました。")
+            let plan = DailyReporter.PlanComparison(
+                worked: [DailyReporter.PlannedWork(task: done, activity: [item])],
+                untouched: [task(id: "t-2", title: "CIを直す", status: .todo, isToday: true)],
+                unplanned: [
                     DailyReporter.ActivityItem(
-                        title: "レビュー: 認証APIの差分", agents: [.claudeCode], lastActivity: now)
-                ],
-                remainingToday: [task(id: "t-2", title: "CIを直す", status: .inProgress)],
-                now: now)
+                        id: "#2", title: "調査: ログの欠落", state: .quiet, lastActivity: now)
+                ])
+            let commits = [
+                RepoCommits(
+                    path: "/Users/alex/src/demo", name: "demo",
+                    subjects: ["Fix the flaky auth test"], total: 3)
+            ]
+            let input = reporter.reportInput(
+                completed: [done], plan: plan, commits: commits, now: now)
             expect(input.contains("READMEを更新する"), "completed task should be listed")
             expect(input.contains("レビュー: 認証APIの差分"), "activity should be listed")
-            expect(input.contains("CIを直す"), "remaining task should be listed")
+            expect(input.contains("CIを直す"), "an untouched planned task should be listed")
+            expect(input.contains("調査: ログの欠落"), "unplanned work should be listed")
+            expect(input.contains("Fix the flaky auth test"), "commit subjects should be listed")
+            expect(input.contains("（他に2件）"), "commits beyond the listed ones should be counted")
             expect(input.contains("現在時刻"), "the point-in-time context should be present")
+            expect(input.contains("セッション2件"), "merged session counts should be listed")
+            expect(input.contains("テストを直す"), "open todos should be listed")
+            expect(input.contains("差分を読み終えました"), "the last output should be listed")
         }
+
+        await TestKit.shared.run("git log: today's own commits are read per repository") {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-git-\(UUID().uuidString)")
+            let repo = root.appendingPathComponent("demo")
+            let nested = repo.appendingPathComponent("sub")
+            try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            func git(_ arguments: [String], in directory: URL) throws {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = ["-C", directory.path] + arguments
+                process.standardOutput = Pipe()
+                process.standardError = Pipe()
+                try process.run()
+                process.waitUntilExit()
+            }
+            try git(["init", "--quiet"], in: repo)
+            try git(["config", "user.email", "alex@example.com"], in: repo)
+            try git(["config", "user.name", "alex"], in: repo)
+            try "hello".write(
+                to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            try git(["add", "."], in: repo)
+            try git(["commit", "--quiet", "-m", "Add the readme"], in: repo)
+
+            // Both paths live in the same repository: it must be read once.
+            let commits = GitLog().commitsToday(paths: [nested.path, repo.path])
+            expectEqual(commits.count, 1)
+            let entry = try unwrap(commits.first)
+            expectEqual(entry.name, "demo")
+            expectEqual(entry.subjects, ["Add the readme"])
+            expect(
+                GitLog().commitsToday(paths: [root.path]).isEmpty,
+                "a directory outside any repository should yield nothing")
+        }
+
+        await TestKit.shared.run("reporter: a fenced JSON reply parses into a report") {
+            let reporter = DailyReporter()
+            let reply = """
+                ```json
+                {"date": "2026-08-19 (水) 18:53 時点", "mid_day": true,
+                 "summary": "今日は PR #123 の移行が中心だった。",
+                 "achievements": [{"title": "PR #123", "detail": "指摘3件を反映した。",
+                                   "meta": ["webapp", "3セッション"]}],
+                 "stuck": [], "observations": ["同じPRに3セッション使っている"]}
+                ```
+                """
+            let report = try unwrap(reporter.parseReport(from: reply))
+            expect(report.midDay, "mid_day should decode")
+            expectEqual(report.achievements.count, 1)
+            expectEqual(report.achievements.first?.meta, ["webapp", "3セッション"])
+            // carry_over was absent: a thin report, not a parse failure.
+            expect(report.carryOver.isEmpty, "a missing section should decode as empty")
+            expectEqual(report.observations.count, 1)
+        }
+
+        await TestKit.shared.run("reporter: an unusable reply parses to nil") {
+            let reporter = DailyReporter()
+            expect(
+                reporter.parseReport(from: "## 完了したこと\n- なにか") == nil,
+                "prose should not be accepted as a report")
+            expect(
+                reporter.parseReport(from: "{\"summary\": \"\"}") == nil,
+                "an object with nothing usable should be rejected")
+        }
+
+        await TestKit.shared.run("renderer: the page is self-contained and escapes text") {
+            let report = DailyReport(
+                date: "2026-08-19 (水) 18:53", midDay: true,
+                summary: ["今日は <script> の混入を試した。", "2段落目。"],
+                achievements: [
+                    ReportEntry(
+                        title: "PR #123", detail: "指摘3件を反映した。",
+                        meta: ["webapp", "5コミット"])
+                ],
+                stuck: [], carryOver: [], observations: ["同じPRに3セッション"])
+            let html = DailyReportRenderer.html(report)
+            expect(html.hasPrefix("<!doctype html>"), "a standalone page should be produced")
+            expect(!html.contains("http://"), "the page must not reference remote assets")
+            expect(!html.contains("<script>"), "text must be escaped, not rendered as markup")
+            expect(html.contains("&lt;script&gt;"), "the escaped form should be present")
+            expect(html.contains("途中経過"), "a mid-day report should say so")
+            expect(html.contains("（なし）"), "an empty section should render its empty state")
+            expect(html.contains("5コミット"), "meta badges should render")
+            expectEqual(html.components(separatedBy: "<p>今日は").count - 1, 1)
+            expect(html.contains("<p>2段落目。</p>"), "the second paragraph should stand alone")
+        }
+
+        await TestKit.shared.run("renderer: markdown keeps every section for pasting") {
+            let report = DailyReport(
+                date: "2026-08-19 (水)", summary: ["概要の文。", "続きの段落。"],
+                achievements: [ReportEntry(title: "PR #123", detail: "反映した。", meta: ["3件"])],
+                carryOver: [ReportEntry(title: "baseline修正", detail: "手が付かなかった。")])
+            let markdown = DailyReportRenderer.markdown(report)
+            expect(markdown.contains("# 日報 2026-08-19 (水)"), "the date line should be present")
+            expect(
+                markdown.contains("概要の文。\n\n続きの段落。"),
+                "summary paragraphs should be separated by a blank line")
+            expect(markdown.contains("**PR #123** 反映した。（3件）"), "entries should carry meta")
+            expect(markdown.contains("## 詰まっているところ\n（なし）"), "empty sections should be named")
+            expect(markdown.contains("baseline修正"), "carry-over should be present")
+        }
+
+        await TestKit.shared.run("metrics: the timeline keeps the longest work in time order") {
+            let now = Date()
+            func item(
+                _ id: String, _ title: String, start: TimeInterval, end: TimeInterval,
+                state: DailyReporter.ActivityState = .quiet, sessions: Int = 1
+            ) -> DailyReporter.ActivityItem {
+                DailyReporter.ActivityItem(
+                    id: id, title: title, sessionCount: sessions, state: state,
+                    firstActivity: now.addingTimeInterval(start),
+                    lastActivity: now.addingTimeInterval(end))
+            }
+            // Nine items: one more than the timeline draws.
+            var unplanned = [
+                item("long", "長い作業", start: -6 * 3600, end: -600, state: .running, sessions: 3),
+                item("short", "短い作業", start: -1800, end: -1740),
+            ]
+            for index in 0..<7 {
+                let offset = Double(index) * 60
+                unplanned.append(
+                    item(
+                        "filler-\(index)", "細かい作業\(index)",
+                        start: -2400 - offset, end: -2100 - offset))
+            }
+            let plan = DailyReporter.PlanComparison(unplanned: unplanned)
+            let metrics = DayMetrics.build(
+                plan: plan,
+                commits: [
+                    RepoCommits(path: "/tmp/demo", name: "demo", subjects: ["a"], total: 4)
+                ],
+                now: now)
+            expectEqual(metrics.timeline.count, DayMetrics.barLimit)
+            expect(
+                metrics.timeline.first?.id == "long",
+                "the longest stretch should survive the cut and come first in time")
+            expect(
+                !metrics.timeline.contains { $0.id == "short" },
+                "the shortest work should be the one dropped")
+            expectEqual(metrics.unplanned, 9)
+            expect(metrics.windowStart <= metrics.timeline[0].start, "the window should cover the bars")
+        }
+
+        await TestKit.shared.run("renderer: figures are drawn from the metrics, not the prose") {
+            let now = Date()
+            let metrics = DayMetrics(
+                timeline: [
+                    DayMetrics.Bar(
+                        id: "#123", title: "PR #123 の移行", state: .awaitingUser,
+                        start: now.addingTimeInterval(-3 * 3600), end: now.addingTimeInterval(-600),
+                        sessionCount: 3)
+                ],
+                dayStart: Calendar.current.startOfDay(for: now), now: now,
+                plannedWorked: 2, plannedUntouched: 1, unplanned: 3,
+                commits: [
+                    RepoCommits(path: "/tmp/demo", name: "demo", subjects: ["a"], total: 5)
+                ])
+            let html = DailyReportRenderer.html(
+                DailyReport(date: "2026-08-19 (水)", summary: ["概要。"]), metrics: metrics)
+            expect(html.contains("時間の使いみち"), "the timeline should be present")
+            expect(html.contains("予定と実際"), "the plan split should be present")
+            expect(html.contains("コミット"), "the commit bars should be present")
+            // State is carried by a label as well as by color.
+            expect(html.contains("確認待ち · "), "each bar should name its state and hours")
+            expect(html.contains("3セッション"), "session counts should label the bar")
+            expect(html.contains("<strong>3</strong>"), "every plan segment should show its count")
+            expect(!html.contains("width:0.00%"), "a bar must never be drawn with no width")
+            expect(
+                DailyReportRenderer.html(
+                    DailyReport(date: "d"), metrics: DayMetrics(dayStart: now, now: now)
+                )
+                .contains("時間の使いみち") == false,
+                "an empty day should draw no figures")
+        }
+
+        await TestKit.shared.run("renderer: the hour axis stays bounded") {
+            let start = Date()
+            let ticks = DailyReportRenderer.hourTicks(
+                from: start, to: start.addingTimeInterval(10 * 3600))
+            expectEqual(ticks.count, 4)
+            let long = DailyReportRenderer.hourTicks(
+                from: start, to: start.addingTimeInterval(100 * 3600))
+            expect(long.count <= 12, "a very long window must not flood the axis")
+        }
+
     }
 }

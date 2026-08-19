@@ -69,10 +69,9 @@ public enum BoardAssembler {
         var entries: [BoardEntry] = []
 
         for task in tasks {
-            let linked = Set(task.sessionIds)
             var attached: [SessionSnapshot] = []
             remaining.removeAll { session in
-                guard matches(session, task: task, linked: linked, labels: labels)
+                guard attaches(session, to: task, labels: labels)
                 else { return false }
                 attached.append(session)
                 return true
@@ -106,14 +105,18 @@ public enum BoardAssembler {
     /// A session belongs to a task by explicit link, by raw-title similarity,
     /// or by its work label naming the same thing the task does — which is
     /// what lets "PR #123 のレビュー" pull in the session doing that review.
-    private static func matches(
-        _ session: SessionSnapshot, task: TaskItem, linked: Set<String>,
-        labels: [String: WorkLabel]
+    ///
+    /// `matchDoneByTitle` opens the title paths for finished tasks too. The
+    /// board keeps them closed, so new activity sharing a done task's title
+    /// stays live instead of disappearing into it; the daily report needs the
+    /// opposite, because it is looking for the sessions that did today's
+    /// finished work.
+    public static func attaches(
+        _ session: SessionSnapshot, to task: TaskItem, labels: [String: WorkLabel] = [:],
+        matchDoneByTitle: Bool = false
     ) -> Bool {
-        if linked.contains(session.id) { return true }
-        // A done task keeps only what the user explicitly tied to it; new
-        // activity that merely shares its title must stay on the live board.
-        if task.status == .done { return false }
+        if task.sessionIds.contains(session.id) { return true }
+        if task.status == .done && !matchDoneByTitle { return false }
         if TitleMatcher.isSimilar(session.title, task.title) { return true }
         guard let label = labels[session.id], !label.isPlaceholder else { return false }
         return TitleMatcher.isSimilar(label.subject, task.title)

@@ -3,24 +3,138 @@ import Foundation
 /// Builds the 「今日のふりかえり」 view's data and the daily-report prompt.
 ///
 /// The report is point-in-time by design: opened mid-day it covers everything
-/// up to now, opened at the end of the day it is the full 日報. All selection
-/// is deterministic; the LLM only turns the selected facts into prose.
+/// up to now, opened at the end of the day it is the full 日報. Selection and
+/// merging are deterministic; the LLM only turns the selected facts into
+/// prose. Merging matters: without it every session of the same PR becomes
+/// its own line and the report degenerates into a transcript of session
+/// titles.
 public struct DailyReporter: Sendable {
     public init() {}
 
-    /// One line of today's session activity: what work ran, on which agent.
-    public struct ActivityItem: Identifiable, Hashable, Sendable {
-        public var id: String { title }
-        public var title: String
-        public var agents: [AgentKind]
-        public var lastActivity: Date
+    /// How much of the user's attention a piece of work still holds.
+    ///
+    /// `awaitingUser` is deliberately not called 進行中: a session that ended
+    /// its turn waiting for input looks the same whether the work is finished
+    /// and the tab was simply left open, or the work is genuinely blocked on
+    /// the user. Only the elapsed time hints at which, so the report says
+    /// "確認待ち" and leaves the judgement to the reader.
+    public enum ActivityState: String, Sendable, Comparable {
+        /// The agent is producing output right now.
+        case running
+        /// Ended its turn waiting for the user; may be blocked, may be abandoned.
+        case awaitingUser
+        /// No recent activity at all.
+        case quiet
 
-        public init(title: String, agents: [AgentKind], lastActivity: Date) {
-            self.title = title
-            self.agents = agents
-            self.lastActivity = lastActivity
+        /// Ordering for the report: the most alive state first.
+        public var rank: Int {
+            switch self {
+            case .running: 0
+            case .awaitingUser: 1
+            case .quiet: 2
+            }
+        }
+
+        public var displayName: String {
+            switch self {
+            case .running: "実行中"
+            case .awaitingUser: "確認待ち"
+            case .quiet: "停止"
+            }
+        }
+
+        public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rank < rhs.rank }
+
+        init(_ status: SessionStatus) {
+            switch status {
+            case .running: self = .running
+            case .waitingInput, .waitingApproval: self = .awaitingUser
+            case .idle: self = .quiet
+            }
         }
     }
+
+    /// One piece of work from today, with every session that touched it merged
+    /// into it. The key is the target (a PR or issue number, otherwise the
+    /// work's subject), so three review sessions on the same PR are one item.
+    public struct ActivityItem: Identifiable, Hashable, Sendable {
+        public var id: String
+        public var title: String
+        public var project: String
+        public var agents: [AgentKind]
+        public var kinds: [WorkKind]
+        public var sessionCount: Int
+        public var state: ActivityState
+        /// Earliest and latest session activity in the group; the day's span
+        /// of this work as far as the transcripts show it.
+        public var firstActivity: Date
+        public var lastActivity: Date
+        /// Unfinished todos left in the sessions, deduplicated.
+        public var openTodos: [String]
+        /// Short excerpt of the newest assistant output: what the work last said.
+        public var lastOutput: String
+        /// Ids of the merged sessions, newest first; how the work is matched
+        /// against the day's planned tasks.
+        public var sessionIds: [String]
+
+        public init(
+            id: String, title: String, project: String = "", agents: [AgentKind] = [],
+            kinds: [WorkKind] = [], sessionCount: Int = 1, state: ActivityState = .quiet,
+            firstActivity: Date = Date(), lastActivity: Date = Date(),
+            openTodos: [String] = [], lastOutput: String = "", sessionIds: [String] = []
+        ) {
+            self.id = id
+            self.title = title
+            self.project = project
+            self.agents = agents
+            self.kinds = kinds
+            self.sessionCount = sessionCount
+            self.state = state
+            self.firstActivity = firstActivity
+            self.lastActivity = lastActivity
+            self.openTodos = openTodos
+            self.lastOutput = lastOutput
+            self.sessionIds = sessionIds
+        }
+    }
+
+    /// A task the day planned for, with the work that actually ran on it.
+    public struct PlannedWork: Sendable {
+        public var task: TaskItem
+        public var activity: [ActivityItem]
+
+        public init(task: TaskItem, activity: [ActivityItem]) {
+            self.task = task
+            self.activity = activity
+        }
+    }
+
+    /// The day's plan next to what happened, which is where a report stops
+    /// listing work and starts saying something: the third bucket names the
+    /// work that took the day without being planned for.
+    public struct PlanComparison: Sendable {
+        /// Planned tasks that saw work today.
+        public var worked: [PlannedWork]
+        /// Planned tasks with no session activity today at all.
+        public var untouched: [TaskItem]
+        /// Work that ran without a planned task behind it.
+        public var unplanned: [ActivityItem]
+
+        public init(
+            worked: [PlannedWork] = [], untouched: [TaskItem] = [],
+            unplanned: [ActivityItem] = []
+        ) {
+            self.worked = worked
+            self.untouched = untouched
+            self.unplanned = unplanned
+        }
+    }
+
+    /// Activity items beyond this many are dropped from the prompt, with the
+    /// dropped count stated in the fact sheet so the LLM never presents a
+    /// truncated day as the whole day.
+    private static let promptItemLimit = 20
+    private static let outputExcerptLength = 160
 
     /// Tasks finished today and still marked done, earliest completion first.
     /// Tasks completed before `completed_at` existed have no timestamp and
@@ -35,52 +149,226 @@ public struct DailyReporter: Sendable {
         .sorted { ($0.completedAt ?? $0.updatedAt) < ($1.completedAt ?? $1.updatedAt) }
     }
 
-    /// Today's session activity, one item per distinct piece of work. Work
-    /// labels name and merge sessions; unlabeled sessions fall back to their
-    /// cleaned titles. Subagents are internal machinery, not the user's work.
+    /// Today's work, one item per target rather than one per session.
+    /// Subagents are internal machinery, not the user's work.
     public func activityToday(
         sessions: [SessionSnapshot], labels: [String: WorkLabel],
         now: Date = Date(), calendar: Calendar = .current
     ) -> [ActivityItem] {
-        var items: [String: ActivityItem] = [:]
-        for session in sessions {
-            guard !session.isSubagent,
-                calendar.isDate(session.lastActivity, inSameDayAs: now)
-            else { continue }
-            let title: String
-            if let label = labels[session.id], !label.isPlaceholder {
-                title = label.displayTitle
-            } else {
-                let cleaned = TitleCleaner.taskLabel(session.title)
-                guard !cleaned.isEmpty else { continue }
-                title = cleaned
+        var groups: [String: ActivityItem] = [:]
+        // Newest first so the group's title and last output come from the most
+        // recent session that touched the work.
+        let today =
+            sessions
+            .filter {
+                !$0.isSubagent && calendar.isDate($0.lastActivity, inSameDayAs: now)
             }
-            var item =
-                items[title]
-                ?? ActivityItem(title: title, agents: [], lastActivity: session.lastActivity)
+            .sorted { $0.lastActivity > $1.lastActivity }
+
+        for session in today {
+            let label = labels[session.id].flatMap { $0.isPlaceholder ? nil : $0 }
+            let title = label?.displayTitle ?? TitleCleaner.taskLabel(session.title)
+            guard isMeaningful(title) else { continue }
+            let subject = label?.subject ?? title
+            let key = mergeKey(subject: subject)
+            let state = ActivityState(session.status)
+            let todos = session.todos.filter { $0.status != .completed }.map(\.content)
+
+            guard var item = groups[key] else {
+                groups[key] = ActivityItem(
+                    id: key, title: title, project: session.projectName,
+                    agents: [session.agent], kinds: label.map { [$0.kind] } ?? [],
+                    sessionCount: 1, state: state,
+                    firstActivity: session.lastActivity, lastActivity: session.lastActivity,
+                    openTodos: todos, lastOutput: excerpt(session.lastAssistantText),
+                    sessionIds: [session.id])
+                continue
+            }
+            item.sessionCount += 1
             if !item.agents.contains(session.agent) { item.agents.append(session.agent) }
+            if let kind = label?.kind, !item.kinds.contains(kind) { item.kinds.append(kind) }
+            item.state = min(item.state, state)
+            item.firstActivity = min(item.firstActivity, session.lastActivity)
             item.lastActivity = max(item.lastActivity, session.lastActivity)
-            items[title] = item
+            for todo in todos where !item.openTodos.contains(todo) { item.openTodos.append(todo) }
+            // Sessions are walked newest first, so the first non-empty output
+            // wins: the newest session may have written nothing yet.
+            if item.lastOutput.isEmpty { item.lastOutput = excerpt(session.lastAssistantText) }
+            item.sessionIds.append(session.id)
+            groups[key] = item
         }
-        return items.values.sorted { $0.lastActivity > $1.lastActivity }
+
+        return groups.values.sorted {
+            $0.state == $1.state
+                ? $0.lastActivity > $1.lastActivity : $0.state < $1.state
+        }
+    }
+
+    /// Lines up today's tasks with today's work.
+    ///
+    /// Tasks count as planned when the user picked them for today or finished
+    /// them today; matching reuses the board's session-to-task rules, so a
+    /// task and the sessions doing it stay together here exactly as they do on
+    /// the board.
+    public func comparePlan(
+        tasks: [TaskItem], activity: [ActivityItem], sessions: [SessionSnapshot],
+        labels: [String: WorkLabel] = [:], now: Date = Date(), calendar: Calendar = .current
+    ) -> PlanComparison {
+        let byId = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let planned = tasks.filter { task in
+            if task.status == .archived { return false }
+            if task.isToday && task.status != .done { return true }
+            return task.status == .done
+                && calendar.isDate(task.completedAt ?? task.updatedAt, inSameDayAs: now)
+        }
+
+        var claimed: Set<String> = []
+        var worked: [PlannedWork] = []
+        var untouched: [TaskItem] = []
+        for task in planned {
+            let matched = activity.filter { item in
+                item.sessionIds.contains { id in
+                    guard let session = byId[id] else { return false }
+                    return BoardAssembler.attaches(
+                        session, to: task, labels: labels, matchDoneByTitle: true)
+                }
+            }
+            if matched.isEmpty {
+                untouched.append(task)
+            } else {
+                claimed.formUnion(matched.map(\.id))
+                worked.append(PlannedWork(task: task, activity: matched))
+            }
+        }
+        return PlanComparison(
+            worked: worked, untouched: untouched,
+            unplanned: activity.filter { !claimed.contains($0.id) })
+    }
+
+    /// Titles that name no work: placeholders the agents write when a session
+    /// has no first user message yet.
+    private func isMeaningful(_ title: String) -> Bool {
+        let stripped = title.trimmingCharacters(in: CharacterSet(charactersIn: "()（） 　"))
+        return !stripped.isEmpty && stripped != "無題" && stripped != "Untitled"
+    }
+
+    /// The merge key for a piece of work. A PR or issue number identifies the
+    /// target far more reliably than the wording around it, so "PR #123 の
+    /// レビュー" and "#123 の 認証APIの移行" land in the same group; without a
+    /// number, the normalized subject has to do.
+    ///
+    /// The project is deliberately not part of the key: one PR is often worked
+    /// on from several worktrees of the same repo, and those have different
+    /// directory names.
+    func mergeKey(subject: String) -> String {
+        if let number = referenceNumber(in: subject) { return "#\(number)" }
+        return normalize(subject)
+    }
+
+    /// First `#1234` / `PR 1234` / `issue 1234` style reference in the text.
+    private func referenceNumber(in text: String) -> String? {
+        let patterns = [
+            #"#\s*(\d{2,6})"#,
+            #"(?i)(?:PR|pull\s*request|issue|チケット)\s*(\d{2,6})"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                let match = regex.firstMatch(
+                    in: text, range: NSRange(text.startIndex..., in: text)),
+                let range = Range(match.range(at: 1), in: text)
+            else { continue }
+            return String(text[range])
+        }
+        return nil
+    }
+
+    /// Folds away the differences that make the same subject look like two:
+    /// case, spacing, and the punctuation agents sprinkle into titles.
+    private func normalize(_ text: String) -> String {
+        let dropped = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(CharacterSet(charactersIn: "・「」（）()【】:：、。/-—"))
+        return text.lowercased().components(separatedBy: dropped).joined()
+    }
+
+    private func excerpt(_ text: String) -> String {
+        let flat = text.replacingOccurrences(
+            of: #"\s+"#, with: " ", options: .regularExpression
+        ).trimmingCharacters(in: .whitespaces)
+        guard flat.count > Self.outputExcerptLength else { return flat }
+        return String(flat.prefix(Self.outputExcerptLength)) + "…"
     }
 
     public func systemPrompt() -> String {
         """
         あなたはユーザーの1日の作業記録から日報を書くアシスタントです。
+        読み手はユーザー本人と、その日の動きを知らないチームメイトです。
 
-        原則:
+        出力は次の形の JSON オブジェクトだけにする。前後に説明を書かない。
+
+        {
+          "date": "2026-08-19 (水) 18:53 時点",
+          "mid_day": true,
+          "summary": ["1〜2文の段落。", "次の段落。", "最後の段落。"],
+          "achievements": [
+            {"title": "PR #123 の 認証APIの移行",
+             "detail": "レビューの指摘3件を反映し、同期経路の移行を通した。",
+             "meta": ["webapp", "3セッション", "5コミット"]}
+          ],
+          "stuck": [],
+          "carry_over": [],
+          "observations": []
+        }
+
+        各フィールドの中身:
+        - date: 事実として与えられた現在時刻を、読みやすい1行にする。1日の途中なら mid_day を true にする。
+        - summary: 2〜4個の段落に分けた配列。1段落は1〜2文にして、長い塊にしない。
+          1段落目でその日の重心（いちばん時間と往復を使った作業）を書き、続く段落で前に進んだこと、
+          進まなかったことを書く。予定外の作業が重心だった場合は、そのことを書く。箇条書きにしない。
+        - achievements: 完了したタスクと、完了はしていないが実質的に前進した作業。
+        - stuck: 確認待ちのまま止まっているもの、未完了TODOが残っているもの。
+        - carry_over: 今日やる予定で完了しなかったタスク。手が付かなかったものは detail にそう書く。
+        - observations: 気付いたこと。数字で裏が取れる範囲に限り、最大2件。0件でよい。
+        - title: 対象が一目でわかる短い句。detail: 何をしてどこまで進んだかの1文。
+        - meta: リポジトリ名、セッション数、コミット数、停止時間など、与えられた事実の中の短い語だけを入れる。最大4個。
+
+        書き方:
+        - 与えられた見出し文の丸写しはしない。事実を読んで、作業の意味がわかる文にする。
+        - 同じ対象（同じ PR、同じ issue、同じ機能）の作業は1項目に統合する。各配列は最大8項目とし、
+          あふれるものは最後の項目にまとめて件数を書く。
+        - 前置き、感想、励ましは書かない。
+
+        事実の扱い:
         - 与えられた事実だけから書く。推測で作業内容を膨らませない。
-        - Markdown で、次の見出し構成にする: 「## 完了したこと」「## 進行中」「## 残っていること」。
-        - 各項目は1行で簡潔に。件数が0の見出しは「（なし）」と書く。
-        - 冒頭に日付と、生成時点が1日の途中ならその旨を1行で書く。
-        - 前置きや感想は不要。日報本文だけを出力する。
+        - 状態が「実行中」のものだけを進行中の作業として扱う。
+        - 状態が「確認待ち」のものは、作業が終わってタブを閉じ忘れた場合と、返答を待って止まっている場合の
+          区別がつかない。どちらかに決めつけず、経過時間が長いものは放置されている可能性に触れる。
+        - observations は数字に基づく観察に限る。「同じPRに3セッション使っている」は書いてよい。
+          「レビューの進め方に問題がある」は推測なので書かない。
         """
+    }
+
+    /// Reads the model's answer as a report.
+    ///
+    /// Models wrap JSON in fences or add a line before it, so the object is
+    /// located by its braces rather than by parsing the whole reply. Returns
+    /// nil when nothing decodes, and the caller shows the raw text instead:
+    /// a badly-shaped answer must not look like an empty day.
+    public func parseReport(from reply: String) -> DailyReport? {
+        guard let start = reply.firstIndex(of: "{"), let end = reply.lastIndex(of: "}"),
+            start < end
+        else { return nil }
+        let json = String(reply[start...end])
+        guard let data = json.data(using: .utf8),
+            let report = try? JSONDecoder().decode(DailyReport.self, from: data),
+            !report.isEmpty
+        else { return nil }
+        return report
     }
 
     /// The fact sheet the LLM writes the report from.
     public func reportInput(
-        completed: [TaskItem], activity: [ActivityItem], remainingToday: [TaskItem],
+        completed: [TaskItem], plan: PlanComparison, commits: [RepoCommits] = [],
         now: Date = Date()
     ) -> String {
         let formatter = DateFormatter()
@@ -88,8 +376,6 @@ public struct DailyReporter: Sendable {
         formatter.dateFormat = "yyyy-MM-dd (E) HH:mm"
         var input = "現在時刻: \(formatter.string(from: now))\n"
 
-        let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "HH:mm"
         input += "\n# 今日完了したタスク\n"
         if completed.isEmpty { input += "（なし）\n" }
         for task in completed {
@@ -98,18 +384,82 @@ public struct DailyReporter: Sendable {
             if !task.detail.isEmpty { input += "    \(task.detail.prefix(200))\n" }
         }
 
-        input += "\n# 今日動いたセッション（進行中の作業を含む）\n"
-        if activity.isEmpty { input += "（なし）\n" }
-        for item in activity {
-            let agents = item.agents.map(\.displayName).joined(separator: ", ")
-            input += "- \(item.title)（\(agents)）\n"
+        input += "\n# 予定していた作業とその進み（同じ対象のセッションは統合済み）\n"
+        if plan.worked.isEmpty { input += "（なし）\n" }
+        for entry in plan.worked {
+            input += "- タスク「\(entry.task.title)」[\(entry.task.status.rawValue)]\n"
+            for item in entry.activity.prefix(3) {
+                input += "  " + activityLine(item, now: now)
+            }
         }
 
-        input += "\n# 今日やる予定でまだ完了していないタスク\n"
-        if remainingToday.isEmpty { input += "（なし）\n" }
-        for task in remainingToday {
-            input += "- [\(task.status.rawValue)] \(task.title)\n"
+        input += "\n# 予定していたが今日は手が付かなかったタスク\n"
+        if plan.untouched.isEmpty { input += "（なし）\n" }
+        for task in plan.untouched {
+            input += "- \(task.title) [\(task.status.rawValue)]\n"
+        }
+
+        input += "\n# 予定外に動いた作業\n"
+        if plan.unplanned.isEmpty { input += "（なし）\n" }
+        for item in plan.unplanned.prefix(Self.promptItemLimit) {
+            input += activityLine(item, now: now)
+        }
+        let dropped = plan.unplanned.count - Self.promptItemLimit
+        if dropped > 0 {
+            input += "（他に\(dropped)件、更新の古いものを省略）\n"
+        }
+
+        input += "\n# 今日のコミット（作業の実体）\n"
+        if commits.isEmpty { input += "（なし、または取得できず）\n" }
+        for repo in commits {
+            input += "- \(repo.name): \(repo.total)件\n"
+            for subject in repo.subjects {
+                input += "    \(subject)\n"
+            }
+            let hidden = repo.total - repo.subjects.count
+            if hidden > 0 { input += "    （他に\(hidden)件）\n" }
         }
         return input
+    }
+
+    /// One activity item as a fact line, with its follow-up lines.
+    private func activityLine(_ item: ActivityItem, now: Date) -> String {
+        var facts: [String] = []
+        if !item.project.isEmpty { facts.append("対象: \(item.project)") }
+        facts.append("状態: \(stateText(for: item, now: now))")
+        let span =
+            "\(timeFormatter.string(from: item.firstActivity))–"
+            + timeFormatter.string(from: item.lastActivity)
+        facts.append("セッション\(item.sessionCount)件 (\(span))")
+        facts.append(item.agents.map(\.displayName).joined(separator: ", "))
+        var line = "- \(item.title)【\(facts.joined(separator: " / "))】\n"
+        if !item.openTodos.isEmpty {
+            line += "    未完了TODO: \(item.openTodos.prefix(5).joined(separator: " / "))\n"
+        }
+        if !item.lastOutput.isEmpty {
+            line += "    直近の出力: \(item.lastOutput)\n"
+        }
+        return line
+    }
+
+    private var timeFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }
+
+    /// State plus, for the ambiguous one, how long it has been sitting there.
+    private func stateText(for item: ActivityItem, now: Date) -> String {
+        guard item.state == .awaitingUser else { return item.state.displayName }
+        let elapsed = max(0, now.timeIntervalSince(item.lastActivity))
+        return "\(item.state.displayName)（\(elapsedText(elapsed))前から止まっており、完了済みか放置かは不明）"
+    }
+
+    private func elapsedText(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)分" }
+        let hours = minutes / 60
+        let rest = minutes % 60
+        return rest == 0 ? "\(hours)時間" : "\(hours)時間\(rest)分"
     }
 }

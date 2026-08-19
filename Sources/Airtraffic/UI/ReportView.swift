@@ -23,7 +23,7 @@ struct ReportView: View {
                     Task { await model.generateDailyReport() }
                 } label: {
                     Label(
-                        model.reportText == nil ? "日報を生成" : "日報を再生成",
+                        model.hasReport ? "日報を再生成" : "日報を生成",
                         systemImage: "sparkles")
                 }
                 .disabled(model.reportBusy)
@@ -31,11 +31,23 @@ struct ReportView: View {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
-                if model.reportText != nil {
+                if model.hasReport {
+                    Button {
+                        openInBrowser()
+                    } label: {
+                        Label("ブラウザで開く", systemImage: "safari")
+                    }
+                    .disabled(model.reportHTML == nil)
+                    Button {
+                        saveHTML()
+                    } label: {
+                        Label("HTMLを保存", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(model.reportHTML == nil)
                     Button {
                         copyReport()
                     } label: {
-                        Label(copied ? "コピーしました" : "コピー", systemImage: "doc.on.doc")
+                        Label(copied ? "コピーしました" : "Markdownをコピー", systemImage: "doc.on.doc")
                     }
                     .disabled(copied)
                 }
@@ -79,10 +91,15 @@ struct ReportView: View {
                     .foregroundStyle(.tertiary)
             }
             ForEach(model.activityToday) { item in
-                HStack(alignment: .firstTextBaseline) {
-                    Text(item.title)
-                    Spacer()
-                    Text(item.agents.map(\.displayName).joined(separator: ", "))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.title)
+                        Spacer()
+                        Text(stateText(item.state))
+                            .font(.caption)
+                            .foregroundStyle(stateColor(item.state))
+                    }
+                    Text(subtitle(for: item))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -117,36 +134,106 @@ struct ReportView: View {
 
     @ViewBuilder
     private var reportSection: some View {
-        if let report = model.reportText {
+        if let html = model.reportHTML {
             Section {
-                // Shown verbatim: the report is Markdown meant for pasting
-                // elsewhere, so what you copy is exactly what you see.
-                Text(verbatim: report)
+                // The page owns its own layout, so the height is fixed here
+                // rather than measured: the list must not fight the web view
+                // over how much room the report gets.
+                ReportWebView(html: html)
+                    .frame(minHeight: 460)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } header: {
+                Label("日報", systemImage: "doc.text")
+                    .foregroundStyle(.purple)
+            }
+        } else if let fallback = model.reportFallback {
+            Section {
+                // The model answered with something that is not a report.
+                // Showing it verbatim beats showing an empty page.
+                Text(verbatim: fallback)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
             } header: {
-                Label("日報", systemImage: "doc.text")
-                    .foregroundStyle(.purple)
+                Label("日報（整形できませんでした）", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
             }
         }
     }
 
     // MARK: - Helpers
 
+    private func stateText(_ state: DailyReporter.ActivityState) -> String {
+        state.displayName
+    }
+
+    /// 確認待ち reads as "still mine to do", but a session can also sit there
+    /// because the work finished and the tab was left open. The row shows the
+    /// state and the elapsed time and leaves that call to the user.
+    private func stateColor(_ state: DailyReporter.ActivityState) -> Color {
+        switch state {
+        case .running: .green
+        case .awaitingUser: .orange
+        case .quiet: .secondary
+        }
+    }
+
+    private func subtitle(for item: DailyReporter.ActivityItem) -> String {
+        var parts: [String] = []
+        if !item.project.isEmpty { parts.append(item.project) }
+        parts.append("\(timeText(item.firstActivity))–\(timeText(item.lastActivity))")
+        if item.sessionCount > 1 { parts.append("セッション\(item.sessionCount)件") }
+        parts.append(item.agents.map(\.displayName).joined(separator: ", "))
+        if !item.openTodos.isEmpty { parts.append("未完了\(item.openTodos.count)件") }
+        return parts.joined(separator: " · ")
+    }
+
     private func timeText(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)
     }
 
     private func copyReport() {
-        guard let report = model.reportText else { return }
+        guard let markdown = model.reportMarkdown else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(report, forType: .string)
+        NSPasteboard.general.setString(markdown, forType: .string)
         copied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
             copied = false
         }
+    }
+
+    /// Opens the report in the default browser, from a temporary file: the
+    /// page is self-contained, so a file URL is enough.
+    private func openInBrowser() {
+        guard let html = model.reportHTML else { return }
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("airtraffic-report-\(UUID().uuidString).html")
+        do {
+            try html.write(to: file, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.open(file)
+        } catch {
+            model.lastError = "\(error)"
+        }
+    }
+
+    private func saveHTML() {
+        guard let html = model.reportHTML else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(defaultFileName()).html"
+        panel.allowedContentTypes = [.html]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try html.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            model.lastError = "\(error)"
+        }
+    }
+
+    private func defaultFileName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "日報-\(formatter.string(from: Date()))"
     }
 }
