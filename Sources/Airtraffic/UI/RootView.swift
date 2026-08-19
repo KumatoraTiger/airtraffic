@@ -152,6 +152,8 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @State private var layout: LaneLayout = RootView.restoreLayout()
     @State private var showSettings = false
+    /// Always-on-top toggle. Persisted so the choice survives relaunches.
+    @AppStorage("windowPinned") private var windowPinned = false
 
     // v2: the sessions/tasks/inbox lanes merged into the board lane. A new key
     // (rather than migrating the old string) so downgrades keep their layout.
@@ -163,9 +165,9 @@ struct RootView: View {
             lanes
         }
         .animation(.easeInOut(duration: 0.2), value: model.pomodoro != nil)
-        // Keep the window above other apps while a pomodoro runs, without
+        // Keep the window above other apps while the pin is on, without
         // taking key focus away from wherever the user is working.
-        .background(WindowLevelPin(pinned: model.pomodoro != nil))
+        .background(WindowLevelPin(pinned: windowPinned))
         .frame(
             minWidth: max(480, layout.columns.map { $0.map(\.minWidth).max() ?? 240 }.reduce(0, +)),
             minHeight: 480
@@ -175,6 +177,13 @@ struct RootView: View {
                 ForEach(Lane.allCases) { lane in
                     laneToggle(lane)
                 }
+                Button {
+                    windowPinned.toggle()
+                } label: {
+                    Label("前面固定", systemImage: windowPinned ? "pin.fill" : "pin")
+                }
+                .foregroundStyle(windowPinned ? Color.orange : Color.secondary)
+                .help(windowPinned ? "前面固定を解除" : "ウィンドウを常に前面に固定")
                 Button {
                     showSettings = true
                 } label: {
