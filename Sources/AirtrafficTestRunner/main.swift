@@ -8,6 +8,7 @@ Task {
     await StoreTests().runAll()
     await ServiceTests().runAll()
     await PomodoroTests().runAll()
+    await PomodoroSoundTests().runAll()
     semaphore.signal()
 }
 semaphore.wait()

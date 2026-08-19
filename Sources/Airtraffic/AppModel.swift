@@ -60,6 +60,14 @@ final class AppModel {
             }
         }
     }
+    /// Chime preferences for the pomodoro, persisted across launches.
+    var soundSettings: PomodoroSoundSettings {
+        didSet {
+            if let data = try? JSONEncoder().encode(soundSettings) {
+                UserDefaults.standard.set(data, forKey: "pomodoroSound")
+            }
+        }
+    }
 
     /// Entries with an execution waiting on the user, among what the live
     /// sections show. Status never moves a row anymore; this only feeds the
@@ -107,6 +115,10 @@ final class AppModel {
                 ?? kind.defaultModel
         }
         self.models = models
+        soundSettings =
+            UserDefaults.standard.data(forKey: "pomodoroSound")
+            .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
+            ?? .default
         if let data = UserDefaults.standard.data(forKey: "pomodoro"),
             let saved = try? JSONDecoder().decode(PomodoroTimer.self, from: data),
             !saved.isExpired(now: Date())
@@ -327,6 +339,16 @@ final class AppModel {
         return tasks.first { $0.id == pomodoro.taskId }?.title
     }
 
+    /// Plays a chime once, for the settings screen's preview buttons.
+    func previewChime(_ chime: PomodoroChime) {
+        playChime(chime)
+    }
+
+    private func playChime(_ chime: PomodoroChime) {
+        guard let name = chime.systemSoundName else { return }
+        NSSound(named: name)?.play()
+    }
+
     /// Runs a 1-second tick while a pomodoro exists: advances `pomodoroNow`
     /// for the menu bar display and rolls an expired timer to its next phase
     /// (work → rest → gone) with a sound.
@@ -345,7 +367,7 @@ final class AppModel {
                 self.pomodoroNow = Date()
                 if let timer = self.pomodoro, timer.isExpired(now: self.pomodoroNow) {
                     self.pomodoro = timer.afterExpiry(now: self.pomodoroNow)
-                    NSSound(named: "Glass")?.play()
+                    self.playChime(self.soundSettings.chime(endingPhase: timer.phase))
                 }
             }
         }

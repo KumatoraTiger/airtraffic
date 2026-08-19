@@ -26,6 +26,7 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            PomodoroSoundSection()
             Section("学習した優先順位の傾向") {
                 if model.preferences.isEmpty {
                     Text("まだありません。タスクを手動で並べ替えると記録されます。")
@@ -89,5 +90,42 @@ struct ProviderSettingsSection: View {
                 .foregroundStyle(.secondary)
         }
         .onAppear { keyStored = KeychainStore.apiKey(for: kind) != nil }
+    }
+}
+
+/// Pomodoro chimes: the sound that marks the end of each phase. The options
+/// are the macOS system sounds, so nothing is bundled with the app.
+struct PomodoroSoundSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Section("ポモドーロの音") {
+            chimeRow("作業終了の音", selection: $model.soundSettings.workEndChime)
+            chimeRow("休憩終了の音", selection: $model.soundSettings.restEndChime)
+            Text("スピーカーボタンで音を試せます。「なし」を選ぶと無音のまま切り替わります。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func chimeRow(
+        _ title: String, selection: Binding<PomodoroChime>
+    ) -> some View {
+        HStack {
+            Picker(title, selection: selection) {
+                ForEach(PomodoroChime.allCases) { chime in
+                    Text(chime.displayName).tag(chime)
+                }
+            }
+            Button {
+                model.previewChime(selection.wrappedValue)
+            } label: {
+                Image(systemName: "speaker.wave.2.fill")
+            }
+            .buttonStyle(.borderless)
+            .disabled(selection.wrappedValue == .none)
+            .help("音を試す")
+        }
     }
 }
