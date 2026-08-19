@@ -158,6 +158,34 @@ struct RootView: View {
     private static let layoutKey = "laneLayout.v2"
 
     var body: some View {
+        VStack(spacing: 0) {
+            PomodoroBanner()
+            lanes
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.pomodoro != nil)
+        .frame(
+            minWidth: max(480, layout.columns.map { $0.map(\.minWidth).max() ?? 240 }.reduce(0, +)),
+            minHeight: 480
+        )
+        .toolbar {
+            ToolbarItemGroup {
+                ForEach(Lane.allCases) { lane in
+                    laneToggle(lane)
+                }
+                Button {
+                    showSettings = true
+                } label: {
+                    Label("設定", systemImage: "gearshape")
+                }
+                .help("設定")
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsSheet()
+        }
+    }
+
+    private var lanes: some View {
         Group {
             if layout.columns.isEmpty {
                 ContentUnavailableView(
@@ -186,26 +214,6 @@ struct RootView: View {
                     }
                 }
             }
-        }
-        .frame(
-            minWidth: max(480, layout.columns.map { $0.map(\.minWidth).max() ?? 240 }.reduce(0, +)),
-            minHeight: 480
-        )
-        .toolbar {
-            ToolbarItemGroup {
-                ForEach(Lane.allCases) { lane in
-                    laneToggle(lane)
-                }
-                Button {
-                    showSettings = true
-                } label: {
-                    Label("設定", systemImage: "gearshape")
-                }
-                .help("設定")
-            }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsSheet()
         }
     }
 

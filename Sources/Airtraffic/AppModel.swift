@@ -1,4 +1,5 @@
 import AirtrafficCore
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -23,6 +24,24 @@ final class AppModel {
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
+    /// The running pomodoro, if any. Persisted so an in-flight timer survives
+    /// an app restart; a timer that expired while the app was closed is
+    /// dropped silently on launch.
+    var pomodoro: PomodoroTimer? {
+        didSet {
+            if let pomodoro, let data = try? JSONEncoder().encode(pomodoro) {
+                UserDefaults.standard.set(data, forKey: "pomodoro")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "pomodoro")
+            }
+            updatePomodoroTicker()
+        }
+    }
+    /// The menu bar's clock. Advanced once a second by the ticker while a
+    /// pomodoro runs, so the label re-renders exactly once a second — a
+    /// self-updating timer Text there redraws the status item every frame
+    /// and pins the main thread.
+    var pomodoroNow = Date()
     var lastError: String?
     var labelingEnabled: Bool {
         didSet { UserDefaults.standard.set(labelingEnabled, forKey: "labelingEnabled") }
@@ -64,6 +83,7 @@ final class AppModel {
     private let labeler = SessionLabeler()
     private let prioritizer = Prioritizer()
     private var scanTask: Task<Void, Never>?
+    private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
 
     init() {
@@ -82,11 +102,20 @@ final class AppModel {
                 ?? kind.defaultModel
         }
         self.models = models
+        if let data = UserDefaults.standard.data(forKey: "pomodoro"),
+            let saved = try? JSONDecoder().decode(PomodoroTimer.self, from: data),
+            !saved.isExpired(now: Date())
+        {
+            pomodoro = saved
+        }
         store = try? Store(path: Store.defaultPath())
         coordinator = .standard()
     }
 
     func start() {
+        // Restoring a persisted timer in init assigns the property without
+        // its didSet, so the ticker needs this explicit kick.
+        updatePomodoroTicker()
         guard scanTask == nil else { return }
         scanTask = Task { [weak self] in
             await self?.refreshFromStore()
@@ -266,6 +295,46 @@ final class AppModel {
             sessionIds: [session.id])
         try? await store.upsertTask(task)
         await refreshLists()
+    }
+
+    // MARK: - Pomodoro
+
+    func startPomodoro(_ task: TaskItem) {
+        pomodoro = .startWork(taskId: task.id, now: Date())
+    }
+
+    func pausePomodoro() { pomodoro = pomodoro?.paused(now: Date()) }
+    func resumePomodoro() { pomodoro = pomodoro?.resumed(now: Date()) }
+    func stopPomodoro() { pomodoro = nil }
+
+    /// The focused task's title, for the menu bar and the timer section.
+    var pomodoroTaskTitle: String? {
+        guard let pomodoro else { return nil }
+        return tasks.first { $0.id == pomodoro.taskId }?.title
+    }
+
+    /// Runs a 1-second tick while a pomodoro exists: advances `pomodoroNow`
+    /// for the menu bar display and rolls an expired timer to its next phase
+    /// (work → rest → gone) with a sound.
+    private func updatePomodoroTicker() {
+        pomodoroNow = Date()
+        if pomodoro == nil {
+            pomodoroTickTask?.cancel()
+            pomodoroTickTask = nil
+            return
+        }
+        guard pomodoroTickTask == nil else { return }
+        pomodoroTickTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.pomodoro != nil else { return }
+                self.pomodoroNow = Date()
+                if let timer = self.pomodoro, timer.isExpired(now: self.pomodoroNow) {
+                    self.pomodoro = timer.afterExpiry(now: self.pomodoroNow)
+                    NSSound(named: "Glass")?.play()
+                }
+            }
+        }
     }
 
     private func refreshLists() async {

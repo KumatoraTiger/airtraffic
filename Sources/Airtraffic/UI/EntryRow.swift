@@ -83,6 +83,9 @@ struct EntryRow: View {
                     statusBadge(status)
                 }
                 if let task = entry.task {
+                    if let timer = model.pomodoro, timer.taskId == task.id {
+                        pomodoroBadge(timer)
+                    }
                     if task.status != .done {
                         todayToggle(task)
                     }
@@ -133,6 +136,11 @@ struct EntryRow: View {
                     Button("完了にする") { Task { await model.setTaskStatus(task, .done) } }
                     Button(task.isToday ? "今日やるから外す" : "今日やるに入れる") {
                         Task { await model.setTaskToday(task, !task.isToday) }
+                    }
+                    if model.pomodoro?.taskId == task.id {
+                        Button("ポモドーロを止める") { model.stopPomodoro() }
+                    } else {
+                        Button("ポモドーロを開始") { model.startPomodoro(task) }
                     }
                 }
                 Button("アーカイブ") { Task { await model.setTaskStatus(task, .archived) } }
@@ -233,6 +241,25 @@ struct EntryRow: View {
         }
         .buttonStyle(.plain)
         .help(task.isToday ? "今日やるから外す" : "今日やるに入れる")
+    }
+
+    /// A live countdown on the focused task's row. The running state uses
+    /// SwiftUI's self-updating timer text, so no view-side ticking is needed.
+    private func pomodoroBadge(_ timer: PomodoroTimer) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: timer.isPaused ? "pause.circle" : pomodoroSymbol(timer.phase))
+            if let endsAt = timer.endsAt {
+                Text(timerInterval: Date()...max(Date(), endsAt), countsDown: true)
+            } else {
+                Text(PomodoroTimer.remainingText(timer.pausedRemaining ?? 0))
+            }
+        }
+        .font(.caption2.monospacedDigit())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(pomodoroColor(timer.phase).opacity(0.15), in: Capsule())
+        .foregroundStyle(pomodoroColor(timer.phase))
+        .help("ポモドーロ\(timer.phase.displayName)中")
     }
 
     private func sourceBadge(_ task: TaskItem) -> some View {
@@ -342,6 +369,20 @@ func kindColor(_ kind: WorkKind) -> Color {
     case .fix: .red
     case .ops: .brown
     case .other: .gray
+    }
+}
+
+func pomodoroSymbol(_ phase: PomodoroTimer.Phase) -> String {
+    switch phase {
+    case .work: "timer"
+    case .rest: "cup.and.saucer.fill"
+    }
+}
+
+func pomodoroColor(_ phase: PomodoroTimer.Phase) -> Color {
+    switch phase {
+    case .work: .red
+    case .rest: .green
     }
 }
 

@@ -7,6 +7,7 @@ Task {
     await adapterTests.runAll()
     await StoreTests().runAll()
     await ServiceTests().runAll()
+    await PomodoroTests().runAll()
     semaphore.signal()
 }
 semaphore.wait()

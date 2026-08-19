@@ -22,11 +22,37 @@ struct AirtrafficApp: App {
             MenuBarContent()
                 .environment(model)
         } label: {
-            if model.waitingCount > 0 {
-                Label("\(model.waitingCount)", systemImage: "airplane.circle.fill")
-            } else {
-                Image(systemName: "airplane.circle")
+            // A real View type, not inline content: observation tracking runs
+            // during a `body` evaluation, so model changes only invalidate the
+            // status item when the reads happen inside one.
+            MenuBarLabel(model: model)
+        }
+    }
+}
+
+/// The status item itself. The countdown takes over while a pomodoro runs;
+/// the waiting count is still one click away in the menu. The countdown text
+/// is static and follows the model's 1-second tick — a self-updating timer
+/// Text here redraws the status item every frame and pins the main thread.
+struct MenuBarLabel: View {
+    let model: AppModel
+
+    var body: some View {
+        // Not Label: MenuBarExtra renders a Label icon-only, dropping the
+        // title, so the icon and text are composed by hand.
+        if let timer = model.pomodoro {
+            HStack(spacing: 3) {
+                Image(systemName: timer.isPaused ? "pause.circle" : pomodoroSymbol(timer.phase))
+                Text(PomodoroTimer.remainingText(timer.remaining(now: model.pomodoroNow)))
+                    .monospacedDigit()
             }
+        } else if model.waitingCount > 0 {
+            HStack(spacing: 3) {
+                Image(systemName: "airplane.circle.fill")
+                Text("\(model.waitingCount)")
+            }
+        } else {
+            Image(systemName: "airplane.circle")
         }
     }
 }
@@ -36,6 +62,17 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if let timer = model.pomodoro {
+            let subject = model.pomodoroTaskTitle ?? "タスク"
+            Text("\(timer.phase.displayName)中: \(String(subject.prefix(40)))")
+            if timer.isPaused {
+                Button("再開") { model.resumePomodoro() }
+            } else {
+                Button("一時停止") { model.pausePomodoro() }
+            }
+            Button("タイマーを止める") { model.stopPomodoro() }
+            Divider()
+        }
         let waiting = model.waitingEntries
         if waiting.isEmpty {
             Text("対応待ちのタスクはありません")
