@@ -163,6 +163,9 @@ struct RootView: View {
             lanes
         }
         .animation(.easeInOut(duration: 0.2), value: model.pomodoro != nil)
+        // Keep the window above other apps while a pomodoro runs, without
+        // taking key focus away from wherever the user is working.
+        .background(WindowLevelPin(pinned: model.pomodoro != nil))
         .frame(
             minWidth: max(480, layout.columns.map { $0.map(\.minWidth).max() ?? 240 }.reduce(0, +)),
             minHeight: 480
