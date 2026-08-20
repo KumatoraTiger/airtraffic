@@ -9,10 +9,13 @@ import SwiftUI
 /// lead with their status symbol and carry 「タスクにする」 (promote to a task) and
 /// 「紐づけ」 (attach to an existing task). Tapping expands the detail and
 /// the attached executions, whose todos can be promoted into persistent tasks.
+/// Subtasks hang one level under the task, each a task in its own right; the
+/// parent row shows their progress as 「2/5」 and never completes on its own.
 struct EntryRow: View {
     @Environment(AppModel.self) private var model
     let entry: BoardEntry
     @State private var expanded = false
+    @State private var newSubtaskTitle = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -46,6 +49,7 @@ struct EntryRow: View {
                     .fontWeight(.medium)
                     .strikethrough(entry.task?.status == .done)
                     .lineLimit(1)
+                subtaskProgress
                 // Expansion lives on this chevron, not on the whole row: any
                 // tap gesture on the row surface (even a simultaneous one)
                 // keeps NSTableView from ever starting a row drag, which
@@ -102,6 +106,7 @@ struct EntryRow: View {
             }
             if entry.task != nil {
                 sessionTree
+                subtaskTree
             } else if let nowDoing {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "arrow.turn.down.right")
@@ -120,6 +125,9 @@ struct EntryRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 14)
+                }
+                if let task = entry.task, !task.isSubtask, task.status != .done {
+                    addSubtaskField(task)
                 }
                 ForEach(entry.sessions) { session in
                     SessionDetail(session: session)
@@ -141,6 +149,12 @@ struct EntryRow: View {
                         Button("ポモドーロを止める") { model.stopPomodoro() }
                     } else {
                         Button("ポモドーロを開始") { model.startPomodoro(task) }
+                    }
+                    if !task.isSubtask {
+                        Button("サブタスクを追加") { withAnimation { expanded = true } }
+                    }
+                    if !nestTargets(for: task).isEmpty {
+                        nestMenu(task)
                     }
                 }
                 Button("アーカイブ") { Task { await model.setTaskStatus(task, .archived) } }
@@ -183,6 +197,78 @@ struct EntryRow: View {
         }
     }
 
+    /// 「2/5」 on the parent row: subtasks done out of subtasks open. No
+    /// rollup happens on completion, so this progress is the only signal.
+    @ViewBuilder
+    private var subtaskProgress: some View {
+        if let progress = entry.subtaskProgress {
+            Text("\(progress.done)/\(progress.total)")
+                .font(.caption2.monospacedDigit())
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.quaternary, in: Capsule())
+                .foregroundStyle(progress.done == progress.total ? .green : .secondary)
+                .help("サブタスクの進捗")
+        }
+    }
+
+    /// The subtasks, indented under their parent. They are rows of their own —
+    /// completable, pomodoro-able, session-attachable — just one level in.
+    @ViewBuilder
+    private var subtaskTree: some View {
+        ForEach(entry.children) { child in
+            SubtaskRow(entry: child)
+                .padding(.leading, 16)
+        }
+    }
+
+    /// Adds one subtask, staying focused for the next: a checklist is
+    /// typically written in one go.
+    private func addSubtaskField(_ task: TaskItem) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.turn.down.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            TextField("サブタスクを追加…", text: $newSubtaskTitle)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .onSubmit { submitSubtask(task) }
+            Button("追加") { submitSubtask(task) }
+                .controlSize(.small)
+                .disabled(newSubtaskTitle.isEmpty)
+        }
+        .padding(.leading, 14)
+    }
+
+    private func submitSubtask(_ task: TaskItem) {
+        let title = newSubtaskTitle
+        newSubtaskTitle = ""
+        Task { await model.addSubtask(of: task, title: title) }
+    }
+
+    /// Hangs this task under another one. Only tasks without subtasks of
+    /// their own are offered, so nesting stays one level deep.
+    private func nestMenu(_ task: TaskItem) -> some View {
+        Menu("別のタスクのサブタスクにする") {
+            ForEach(nestTargets(for: task)) { parent in
+                Button(parent.title) {
+                    Task { await model.nestTask(task, under: parent) }
+                }
+            }
+        }
+    }
+
+    /// Open top-level tasks other than this one. A task that already has
+    /// subtasks is not offered a parent at all (that would be two levels),
+    /// which is why the menu is hidden for it.
+    private func nestTargets(for task: TaskItem) -> [TaskItem] {
+        guard entry.children.isEmpty else { return [] }
+        return model.tasks.filter {
+            $0.id != task.id && $0.parentId == nil && $0.status != .done
+                && $0.status != .archived
+        }
+    }
+
     private func sessionLabel(_ session: SessionSnapshot) -> String {
         let title = TitleCleaner.taskLabel(session.title)
         return title.isEmpty ? session.agent.displayName : title
@@ -192,7 +278,7 @@ struct EntryRow: View {
     private var linkMenu: some View {
         Menu {
             ForEach(openTasks) { task in
-                Button(task.title) {
+                Button(linkLabel(task)) {
                     Task { await model.linkEntry(entry, to: task) }
                 }
             }
@@ -208,6 +294,12 @@ struct EntryRow: View {
 
     private var openTasks: [TaskItem] {
         model.tasks.filter { $0.status != .done && $0.status != .archived }
+    }
+
+    /// Subtasks read as children in the 紐づけ menu too, so linking a session
+    /// to the right level is one glance.
+    private func linkLabel(_ task: TaskItem) -> String {
+        task.isSubtask ? "↳ \(task.title)" : task.title
     }
 
     private var agents: [AgentKind] {
@@ -299,6 +391,115 @@ struct EntryRow: View {
             .padding(.vertical, 2)
             .background(statusColor(status).opacity(0.15), in: Capsule())
             .foregroundStyle(statusColor(status))
+    }
+}
+
+/// One subtask under its parent. A task in its own right — completable,
+/// pomodoro-able, and able to carry the sessions doing it — rendered flatter
+/// than a top-level row so the hierarchy reads at a glance. Reordering is in
+/// the context menu: the board's drag gesture belongs to the top-level list.
+private struct SubtaskRow: View {
+    @Environment(AppModel.self) private var model
+    let entry: BoardEntry
+    @State private var expanded = false
+
+    var body: some View {
+        let task = entry.task
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "arrow.turn.down.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if let task {
+                    Button {
+                        Task {
+                            await model.setTaskStatus(
+                                task, task.status == .done ? .todo : .done)
+                        }
+                    } label: {
+                        Image(
+                            systemName: task.status == .done
+                                ? "checkmark.circle.fill" : "circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(task.status == .done ? .green : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("完了にする")
+                }
+                Text(entry.title)
+                    .font(.callout)
+                    .strikethrough(task?.status == .done)
+                    .foregroundStyle(task?.status == .done ? .secondary : .primary)
+                    .lineLimit(1)
+                if !entry.sessions.isEmpty {
+                    Button {
+                        withAnimation { expanded.toggle() }
+                    } label: {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(expanded ? "折りたたむ" : "セッションを表示")
+                }
+                Spacer()
+                ForEach(agents, id: \.self) { agent in
+                    Image(systemName: agent.symbol)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help(agent.displayName)
+                }
+                if let timer = model.pomodoro, let task, timer.taskId == task.id {
+                    Image(systemName: pomodoroSymbol(timer.phase))
+                        .font(.caption2)
+                        .foregroundStyle(pomodoroColor(timer.phase))
+                        .help("ポモドーロ\(timer.phase.displayName)中")
+                }
+                if entry.isLive, let status = entry.liveStatus {
+                    Text(status.displayName)
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(statusColor(status).opacity(0.15), in: Capsule())
+                        .foregroundStyle(statusColor(status))
+                }
+            }
+            if expanded {
+                ForEach(entry.sessions) { session in
+                    SessionDetail(session: session)
+                        .padding(.leading, 18)
+                }
+            }
+        }
+        .contextMenu {
+            if let task {
+                if task.status == .done {
+                    Button("未完了に戻す") { Task { await model.setTaskStatus(task, .todo) } }
+                } else {
+                    Button("完了にする") { Task { await model.setTaskStatus(task, .done) } }
+                    if model.pomodoro?.taskId == task.id {
+                        Button("ポモドーロを止める") { model.stopPomodoro() }
+                    } else {
+                        Button("ポモドーロを開始") { model.startPomodoro(task) }
+                    }
+                }
+                Button("上へ") { Task { await model.moveSubtask(task, up: true) } }
+                Button("下へ") { Task { await model.moveSubtask(task, up: false) } }
+                Button("サブタスクをやめる（単独のタスクに戻す）") {
+                    Task { await model.promoteSubtask(task) }
+                }
+                Button("アーカイブ") { Task { await model.setTaskStatus(task, .archived) } }
+            }
+        }
+    }
+
+    private var agents: [AgentKind] {
+        var seen: [AgentKind] = []
+        for session in entry.sessions where !seen.contains(session.agent) {
+            seen.append(session.agent)
+        }
+        return seen
     }
 }
 

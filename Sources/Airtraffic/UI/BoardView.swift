@@ -8,7 +8,7 @@ import SwiftUI
 /// - 今日やる: the tasks the user picked for today's focus; they stay here
 ///   until taken off by hand
 /// - タスク: the priority list itself — every other open task, in rank order,
-///   with its linked sessions hanging under it as a tree
+///   with its subtasks and linked sessions hanging under it as a tree
 /// - タスク外の動き: agent activity matching no task, active within 24 hours
 /// - 完了: done tasks (with their sessions) and aged-out activity
 struct BoardView: View {

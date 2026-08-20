@@ -34,11 +34,12 @@ struct ServiceTests {
 
     private func task(
         id: String, title: String, sessionIds: [String] = [], status: TaskStatus = .todo,
-        isToday: Bool = false
+        isToday: Bool = false, parentId: String? = nil
     ) -> TaskItem {
         TaskItem(
             id: id, title: title, detail: "", status: status, rank: nil, isToday: isToday,
-            source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: sessionIds)
+            source: .manual, createdAt: Date(), updatedAt: Date(), parentId: parentId,
+            sessionIds: sessionIds)
     }
 
     func runAll() async {
@@ -746,5 +747,49 @@ struct ServiceTests {
             expect(long.count <= 12, "a very long window must not flood the axis")
         }
 
+        await TestKit.shared.run("board: subtasks hang under their parent row") {
+            let tasks = [
+                task(id: "t-1", title: "認証を直す"),
+                task(id: "t-2", title: "トークン検証を書く", parentId: "t-1"),
+                task(id: "t-3", title: "テストを足す", status: .done, parentId: "t-1"),
+                task(id: "t-4", title: "READMEを更新する"),
+            ]
+            let entries = BoardAssembler.assemble(tasks: tasks, sessions: [])
+            // Only the two top-level tasks are rows of the board.
+            expectEqual(entries.map(\.id), ["t-1", "t-4"])
+
+            let parent = try unwrap(entries.first { $0.id == "t-1" })
+            expectEqual(parent.children.map(\.id), ["t-2", "t-3"])
+            expectEqual(parent.selfAndChildren.count, 3)
+            let progress = try unwrap(parent.subtaskProgress)
+            expectEqual(progress.done, 1)
+            expectEqual(progress.total, 2)
+            expect(
+                entries.first { $0.id == "t-4" }?.subtaskProgress == nil,
+                "a task without subtasks shows no progress")
+        }
+
+        await TestKit.shared.run("board: a subtask keeps its own sessions") {
+            let tasks = [
+                task(id: "t-1", title: "認証を直す"),
+                task(
+                    id: "t-2", title: "トークン検証を書く", sessionIds: ["claude:s-1"],
+                    parentId: "t-1"),
+            ]
+            let sessions = [session(id: "claude:s-1", title: "検証の実装", status: .waitingInput)]
+            let entries = BoardAssembler.assemble(tasks: tasks, sessions: sessions)
+            expectEqual(entries.count, 1)
+            let child = try unwrap(entries.first?.children.first)
+            expectEqual(child.sessions.map(\.id), ["claude:s-1"])
+            expectEqual(child.liveStatus, .waitingInput)
+            expect(entries[0].sessions.isEmpty, "the session belongs to the subtask, not the parent")
+        }
+
+        await TestKit.shared.run("board: an orphaned subtask stays visible") {
+            // The parent was archived, so tasks() no longer returns it.
+            let tasks = [task(id: "t-2", title: "トークン検証を書く", parentId: "t-1")]
+            let entries = BoardAssembler.assemble(tasks: tasks, sessions: [])
+            expectEqual(entries.map(\.id), ["t-2"])
+        }
     }
 }

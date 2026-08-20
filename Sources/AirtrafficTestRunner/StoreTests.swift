@@ -114,5 +114,30 @@ struct StoreTests {
             expect(labels["claude:s-2"] == nil, "the stale label should be gone")
         }
 
+        await TestKit.shared.run("store: subtask parent link roundtrip") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let parent = TaskItem(
+                id: "t-1", title: "認証を直す", detail: "", status: .todo, rank: 0,
+                source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: []
+            )
+            var child = TaskItem(
+                id: "t-2", title: "リフレッシュトークンを検証する", detail: "", status: .todo,
+                rank: 0, source: .manual, createdAt: Date(), updatedAt: Date(),
+                parentId: "t-1", sessionIds: []
+            )
+            try await store.upsertTask(parent)
+            try await store.upsertTask(child)
+            var fetched = try await store.tasks()
+            expectEqual(fetched.first { $0.id == "t-1" }?.parentId, nil)
+            expectEqual(fetched.first { $0.id == "t-2" }?.parentId, "t-1")
+            expectEqual(fetched.first { $0.id == "t-2" }?.isSubtask, true)
+
+            // Detaching writes the null back, instead of keeping the old parent.
+            child.parentId = nil
+            try await store.upsertTask(child)
+            fetched = try await store.tasks()
+            expect(fetched.first { $0.id == "t-2" }?.parentId == nil, "the link should be gone")
+        }
     }
 }

@@ -12,12 +12,30 @@ public struct BoardEntry: Identifiable, Sendable {
     /// What this work *is* ("レビュー: 認証APIの差分"), when the LLM has
     /// labeled it. Nil until then; everything falls back to session titles.
     public var label: WorkLabel?
+    /// Subtask rows hanging under this one, in sibling order. Only one level
+    /// deep: a child's own `children` is always empty.
+    public var children: [BoardEntry]
 
-    public init(id: String, task: TaskItem?, sessions: [SessionSnapshot], label: WorkLabel? = nil) {
+    public init(
+        id: String, task: TaskItem?, sessions: [SessionSnapshot], label: WorkLabel? = nil,
+        children: [BoardEntry] = []
+    ) {
         self.id = id
         self.task = task
         self.sessions = sessions
         self.label = label
+        self.children = children
+    }
+
+    /// This row and its subtask rows, for callers that count work rather than
+    /// display it (the waiting badge, the menu bar).
+    public var selfAndChildren: [BoardEntry] { [self] + children }
+
+    /// How many subtasks are done, out of how many. Nil without subtasks.
+    public var subtaskProgress: (done: Int, total: Int)? {
+        let open = children.compactMap(\.task).filter { $0.status != .archived }
+        guard !open.isEmpty else { return nil }
+        return (open.filter { $0.status == .done }.count, open.count)
     }
 
     public var title: String {
@@ -67,6 +85,9 @@ public enum BoardAssembler {
     ) -> [BoardEntry] {
         var remaining = sessions
         var entries: [BoardEntry] = []
+        // A subtask whose parent is gone (archived, deleted) would otherwise
+        // vanish from the board, so it is treated as a top-level task.
+        let known = Set(tasks.map(\.id))
 
         for task in tasks {
             var attached: [SessionSnapshot] = []
@@ -82,6 +103,8 @@ public enum BoardAssembler {
                     id: task.id, task: task, sessions: sorted,
                     label: sorted.compactMap { labels[$0.id] }.first { !$0.isPlaceholder }))
         }
+
+        entries = nest(entries, known: known)
 
         var groups: [String: [SessionSnapshot]] = [:]
         for session in remaining {
@@ -100,6 +123,24 @@ public enum BoardAssembler {
                 ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast)
             })
         return entries
+    }
+
+    /// Hangs subtask rows under their parent row, keeping both the parent
+    /// order and the sibling order the caller passed in.
+    private static func nest(_ entries: [BoardEntry], known: Set<String>) -> [BoardEntry] {
+        var childrenByParent: [String: [BoardEntry]] = [:]
+        for entry in entries {
+            guard let parentId = entry.task?.parentId, known.contains(parentId) else { continue }
+            childrenByParent[parentId, default: []].append(entry)
+        }
+        guard !childrenByParent.isEmpty else { return entries }
+        return entries.compactMap { entry in
+            guard let task = entry.task else { return entry }
+            if let parentId = task.parentId, known.contains(parentId) { return nil }
+            var parent = entry
+            parent.children = childrenByParent[task.id] ?? []
+            return parent
+        }
     }
 
     /// A session belongs to a task by explicit link, by raw-title similarity,

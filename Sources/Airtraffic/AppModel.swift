@@ -94,7 +94,7 @@ final class AppModel {
     /// sections show. Status never moves a row anymore; this only feeds the
     /// lane badges and the menu bar.
     var waitingEntries: [BoardEntry] {
-        boardEntries.filter { entry in
+        boardEntries.flatMap(\.selfAndChildren).filter { entry in
             guard entry.liveStatus?.needsAttention == true else { return false }
             if let task = entry.task { return task.status != .done }
             return entry.isRecent()
@@ -246,6 +246,74 @@ final class AppModel {
         await refreshLists()
     }
 
+    /// Adds a subtask under `parent`, at the end of its sibling list.
+    /// Only one level deep: a subtask's own subtask lands under the same
+    /// parent instead of nesting further.
+    func addSubtask(of parent: TaskItem, title: String) async {
+        guard let store, !title.isEmpty else { return }
+        let parentId = parent.parentId ?? parent.id
+        let task = TaskItem(
+            id: UUID().uuidString, title: title, detail: "", status: .todo,
+            rank: nextSiblingRank(parentId: parentId),
+            source: .manual, createdAt: Date(), updatedAt: Date(),
+            parentId: parentId, sessionIds: [])
+        try? await store.upsertTask(task)
+        await refreshLists()
+    }
+
+    /// Swaps a subtask with its neighbour. Sibling order is the rank column,
+    /// same as the top-level list, so a move is a rewrite of both ranks.
+    func moveSubtask(_ task: TaskItem, up: Bool) async {
+        guard let store, let parentId = task.parentId else { return }
+        let siblings = subtasks(of: parentId)
+        guard let index = siblings.firstIndex(where: { $0.id == task.id }) else { return }
+        let target = up ? index - 1 : index + 1
+        guard siblings.indices.contains(target) else { return }
+        var reordered = siblings
+        reordered.swapAt(index, target)
+        for (rank, sibling) in reordered.enumerated() where sibling.rank != rank {
+            var updated = sibling
+            updated.rank = rank
+            updated.updatedAt = Date()
+            try? await store.upsertTask(updated)
+        }
+        await refreshLists()
+    }
+
+    /// Detaches a subtask, putting it back on the top-level list.
+    func promoteSubtask(_ task: TaskItem) async {
+        guard let store, task.parentId != nil else { return }
+        var updated = task
+        updated.parentId = nil
+        updated.rank = nil
+        updated.updatedAt = Date()
+        try? await store.upsertTask(updated)
+        await refreshLists()
+    }
+
+    /// Hangs an existing top-level task under another one, at the end of its
+    /// subtasks. A task with subtasks of its own is not offered as a child,
+    /// so nesting stays one level deep.
+    func nestTask(_ task: TaskItem, under parent: TaskItem) async {
+        guard let store, task.id != parent.id, parent.parentId == nil else { return }
+        var updated = task
+        updated.parentId = parent.id
+        updated.isToday = false
+        updated.rank = nextSiblingRank(parentId: parent.id)
+        updated.updatedAt = Date()
+        try? await store.upsertTask(updated)
+        await refreshLists()
+    }
+
+    /// Subtasks of a parent, in display order.
+    func subtasks(of parentId: String) -> [TaskItem] {
+        tasks.filter { $0.parentId == parentId }
+    }
+
+    private func nextSiblingRank(parentId: String) -> Int {
+        (subtasks(of: parentId).compactMap(\.rank).max() ?? -1) + 1
+    }
+
     /// Puts a task into (or takes it out of) the 「今日やる」 section. The flag
     /// sticks across days until the user flips it back.
     func setTaskToday(_ task: TaskItem, _ isToday: Bool) async {
@@ -330,19 +398,31 @@ final class AppModel {
         await refreshLists()
     }
 
-    /// Promote a session's in-transcript todo into a global task.
+    /// Promote a session's in-transcript todo into a global task. When the
+    /// session already hangs under a task, the todo becomes a subtask of it —
+    /// which is where a promoted todo belongs.
     func promoteTodo(_ todo: TodoItem, from session: SessionSnapshot) async {
         guard let store else { return }
         let done = todo.status == .completed
+        let parent = owningTask(of: session)
         let task = TaskItem(
             id: UUID().uuidString, title: todo.content,
             detail: "セッション「\(session.title)」の todo から昇格",
-            status: done ? .done : .todo, rank: nil,
+            status: done ? .done : .todo,
+            rank: parent.map { nextSiblingRank(parentId: $0.id) },
             source: .deterministic, createdAt: Date(), updatedAt: Date(),
             completedAt: done ? Date() : nil,
+            parentId: parent?.id,
             sessionIds: [session.id])
         try? await store.upsertTask(task)
         await refreshLists()
+    }
+
+    /// The top-level task a session is attached to, if any.
+    private func owningTask(of session: SessionSnapshot) -> TaskItem? {
+        boardEntries
+            .first { entry in entry.sessions.contains { $0.id == session.id } }?
+            .task
     }
 
     // MARK: - Pomodoro

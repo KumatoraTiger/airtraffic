@@ -46,6 +46,7 @@ public actor Store {
         try db.execute("DROP TABLE IF EXISTS candidates")
         try Self.migrateTaskIsToday(db)
         try Self.migrateTaskCompletedAt(db)
+        try Self.migrateTaskParentId(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -87,6 +88,13 @@ public actor Store {
         let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
         guard !columns.contains("completed_at") else { return }
         try db.execute("ALTER TABLE tasks ADD COLUMN completed_at REAL")
+    }
+
+    /// Adds the parent link behind subtasks. Existing tasks stay top-level.
+    private static func migrateTaskParentId(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
+        guard !columns.contains("parent_id") else { return }
+        try db.execute("ALTER TABLE tasks ADD COLUMN parent_id TEXT")
     }
 
     // MARK: - Cursors
@@ -131,6 +139,7 @@ public actor Store {
                 createdAt: Date(timeIntervalSince1970: row.real("created_at")),
                 updatedAt: Date(timeIntervalSince1970: row.real("updated_at")),
                 completedAt: row.realOrNil("completed_at").map(Date.init(timeIntervalSince1970:)),
+                parentId: row.textOrNil("parent_id"),
                 sessionIds: sessionsByTask[row.text("id")] ?? []
             )
         }
@@ -139,12 +148,12 @@ public actor Store {
     public func upsertTask(_ task: TaskItem) throws {
         try db.execute(
             """
-            INSERT INTO tasks (id, title, detail, status, rank, is_today, source, created_at, updated_at, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tasks (id, title, detail, status, rank, is_today, source, created_at, updated_at, completed_at, parent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title, detail = excluded.detail, status = excluded.status,
                 rank = excluded.rank, is_today = excluded.is_today, updated_at = excluded.updated_at,
-                completed_at = excluded.completed_at
+                completed_at = excluded.completed_at, parent_id = excluded.parent_id
             """,
             [
                 .text(task.id), .text(task.title), .text(task.detail), .text(task.status.rawValue),
@@ -154,6 +163,7 @@ public actor Store {
                 .real(task.createdAt.timeIntervalSince1970),
                 .real(task.updatedAt.timeIntervalSince1970),
                 task.completedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                task.parentId.map { .text($0) } ?? .null,
             ])
         for sessionId in task.sessionIds {
             try db.execute(

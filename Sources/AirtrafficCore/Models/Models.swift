@@ -151,12 +151,15 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     /// When the task last entered `done`. Cleared if it is reopened, so the
     /// daily report only counts work finished (and still finished) today.
     public var completedAt: Date?
+    /// The task this one hangs under, nil for a top-level task. Only one level
+    /// deep: a subtask never has subtasks of its own.
+    public var parentId: String?
     public var sessionIds: [String]
 
     public init(
         id: String, title: String, detail: String, status: TaskStatus, rank: Int?,
         isToday: Bool = false, source: TaskSource, createdAt: Date, updatedAt: Date,
-        completedAt: Date? = nil, sessionIds: [String]
+        completedAt: Date? = nil, parentId: String? = nil, sessionIds: [String]
     ) {
         self.id = id
         self.title = title
@@ -168,8 +171,11 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.completedAt = completedAt
+        self.parentId = parentId
         self.sessionIds = sessionIds
     }
+
+    public var isSubtask: Bool { parentId != nil }
 }
 
 // MARK: - Preference
