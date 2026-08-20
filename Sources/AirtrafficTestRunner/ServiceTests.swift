@@ -11,6 +11,15 @@ struct MockLLMClient: LLMClient {
 }
 
 struct ServiceTests {
+    /// Tests place work several hours before "now", so "now" has to sit late
+    /// enough in the local day for those hours to still belong to today. A wall
+    /// clock makes that depend on the time of day the suite runs: CI pushes at
+    /// 02:00 UTC, where four hours ago is yesterday and the day's activity gets
+    /// filtered out. Every test therefore anchors to the same hour instead.
+    private var midDay: Date {
+        Calendar.current.date(bySettingHour: 18, minute: 30, second: 0, of: Date()) ?? Date()
+    }
+
     private func session(
         id: String, title: String, cwd: String = "/Users/alex/src/demo",
         agent: AgentKind = .claudeCode, status: SessionStatus = .running,
@@ -105,7 +114,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("board: attached sessions order by recency, newest first") {
-            let now = Date()
+            let now = midDay
             let tasks = [
                 task(id: "t-1", title: "認証を直す", sessionIds: ["claude:s-1", "claude:s-2"])
             ]
@@ -184,7 +193,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("labeler: relabels only missing or stale, newest first") {
-            let now = Date()
+            let now = midDay
             let fresh = session(
                 id: "claude:s-1", title: "a", lastActivity: now.addingTimeInterval(-50))
             let stale = session(
@@ -209,7 +218,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("board: labeled sessions merge across worktrees") {
-            let now = Date()
+            let now = midDay
             func reviewLabel(_ id: String) -> WorkLabel {
                 WorkLabel(
                     sessionId: id, kind: .review, subject: "認証APIの差分",
@@ -246,7 +255,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("board: a label attaches its session to the matching task") {
-            let now = Date()
+            let now = midDay
             let labels = [
                 "claude:s-1": WorkLabel(
                     sessionId: "claude:s-1", kind: .review, subject: "PR #123 のレビュー",
@@ -299,7 +308,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: completedToday keeps only tasks finished today") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             let yesterday = now.addingTimeInterval(-24 * 3600)
             var doneToday = task(id: "t-1", title: "READMEを更新する", status: .done)
             doneToday.completedAt = now.addingTimeInterval(-3600)
@@ -319,7 +328,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: activityToday merges by label and skips stale") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             let sessions = [
                 session(id: "claude:s-1", title: "認証APIの差分を見て", lastActivity: now),
                 session(
@@ -350,7 +359,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: activityToday merges differently worded work on one PR") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             let sessions = [
                 session(
                     id: "claude:s-1", title: "PR #123 を見る",
@@ -394,7 +403,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: waiting sessions are not reported as running") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             let sessions = [
                 session(
                     id: "claude:s-1", title: "承認待ちの作業", status: .waitingApproval,
@@ -423,7 +432,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: plan comparison splits planned, untouched, unplanned") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             let sessions = [
                 session(id: "claude:s-1", title: "READMEを更新する", lastActivity: now),
                 session(id: "claude:s-2", title: "PR #123 のレビュー", lastActivity: now),
@@ -448,7 +457,7 @@ struct ServiceTests {
 
         await TestKit.shared.run("reporter: report input carries the day's facts") {
             let reporter = DailyReporter()
-            let now = Date()
+            let now = midDay
             var done = task(id: "t-1", title: "READMEを更新する", status: .done, isToday: true)
             done.completedAt = now
             let item = DailyReporter.ActivityItem(
@@ -617,7 +626,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("renderer: the tiles count the day from the facts") {
-            let now = Date()
+            let now = midDay
             let metrics = DayMetrics(
                 dayStart: now.addingTimeInterval(-3600), now: now,
                 plannedWorked: 2, plannedUntouched: 1, unplanned: 3,
@@ -655,7 +664,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("metrics: the timeline keeps the longest work in time order") {
-            let now = Date()
+            let now = midDay
             func item(
                 _ id: String, _ title: String, start: TimeInterval, end: TimeInterval,
                 state: DailyReporter.ActivityState = .quiet, sessions: Int = 1
@@ -696,7 +705,7 @@ struct ServiceTests {
         }
 
         await TestKit.shared.run("renderer: figures are drawn from the metrics, not the prose") {
-            let now = Date()
+            let now = midDay
             let metrics = DayMetrics(
                 timeline: [
                     DayMetrics.Bar(
