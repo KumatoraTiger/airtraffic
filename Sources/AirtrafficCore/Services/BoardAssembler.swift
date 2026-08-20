@@ -41,7 +41,9 @@ public struct BoardEntry: Identifiable, Sendable {
     public var title: String {
         if let task { return task.title }
         if let label, !label.isPlaceholder { return label.subject }
-        let title = TitleCleaner.taskLabel(sessions.first?.title ?? "")
+        let raw = sessions.first?.title ?? ""
+        if TitleCleaner.isPlaceholder(raw) { return "無題のセッション" }
+        let title = TitleCleaner.taskLabel(raw)
         return title.isEmpty ? "無題のセッション" : title
     }
 
@@ -175,6 +177,8 @@ public enum BoardAssembler {
         if let label = labels[session.id], !label.isPlaceholder {
             return "label|\(label.kind.rawValue)|\(TitleMatcher.key(label.subject))"
         }
+        // "(無題)" is not a name two sessions share, it is the absence of one.
+        guard !TitleCleaner.isPlaceholder(session.title) else { return session.id }
         let titleKey = TitleMatcher.key(session.title)
         return titleKey.isEmpty ? session.id : "\(titleKey)|\(session.cwd)"
     }

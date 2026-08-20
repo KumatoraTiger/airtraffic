@@ -7,6 +7,14 @@ import Foundation
 public enum TitleCleaner {
     private static let maxLength = 60
 
+    /// True for the titles adapters write when a session names no work yet.
+    /// Such a title identifies nothing, so it must never merge two sessions
+    /// nor stand in for a real one.
+    public static func isPlaceholder(_ title: String) -> Bool {
+        let stripped = title.trimmingCharacters(in: CharacterSet(charactersIn: "()（） 　"))
+        return stripped.isEmpty || stripped == "無題" || stripped == "Untitled"
+    }
+
     public static func taskLabel(_ raw: String) -> String {
         guard
             var line = raw.split(whereSeparator: \.isNewline)

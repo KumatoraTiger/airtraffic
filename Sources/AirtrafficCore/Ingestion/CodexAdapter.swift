@@ -24,6 +24,16 @@ public final class CodexAdapter: AgentAdapter {
         var todos: [TodoItem] = []
         var pendingCalls = 0  // function_call without function_call_output
         var tasksInFlight = 0  // task_started without task_complete
+
+        /// Records a user turn, keeping the first human line for the title.
+        func noteUserText(_ text: String) {
+            if firstUserText == nil {
+                let human = PromptText.humanLine(text)
+                if !human.isEmpty { firstUserText = human }
+            }
+            lastUserText = text
+            lastRoleIsAssistant = false
+        }
     }
 
     public init(root: URL? = nil, config: ScanConfig = .default) {
@@ -142,9 +152,7 @@ public final class CodexAdapter: AgentAdapter {
         switch payload["type"] as? String {
         case "user_message":
             guard !text.isEmpty else { return }
-            if state.firstUserText == nil { state.firstUserText = text }
-            state.lastUserText = text
-            state.lastRoleIsAssistant = false
+            state.noteUserText(text)
         case "agent_message":
             guard !text.isEmpty else { return }
             state.lastAssistantText = text
@@ -162,6 +170,14 @@ public final class CodexAdapter: AgentAdapter {
 
     private func ingestResponseItem(_ payload: [String: Any], into state: State) {
         switch payload["type"] as? String {
+        // Some threads (orchestrated ones especially) record the user turn only
+        // here, never as a `user_message` event, so this is the second source
+        // of the title rather than a duplicate of the first.
+        case "message":
+            guard payload["role"] as? String == "user" else { return }
+            let text = Self.inputText(payload["content"])
+            guard !text.isEmpty else { return }
+            state.noteUserText(text)
         case "function_call":
             state.pendingCalls += 1
             // Codex maintains its plan via the update_plan tool; that plan is
@@ -182,5 +198,13 @@ public final class CodexAdapter: AgentAdapter {
         default:
             break
         }
+    }
+
+    /// Concatenated `input_text` blocks of a response_item message.
+    private static func inputText(_ content: Any?) -> String {
+        if let text = content as? String { return text }
+        guard let blocks = content as? [[String: Any]] else { return "" }
+        return blocks.compactMap { $0["text"] as? String }.filter { !$0.isEmpty }
+            .joined(separator: "\n")
     }
 }

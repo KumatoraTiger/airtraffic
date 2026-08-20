@@ -246,6 +246,110 @@ final class AdapterTests {
             expectEqual(sessions.first?.id, "grok:g-3")
         }
 
+        await TestKit.shared.run("grok: empty summary falls back, not to (無題)") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(
+                id: "g-5", updatedSecondsAgo: 300, summary: "",
+                generatedTitle: "PR 42 のレビュー")
+            try writeGrokActive(sessionId: "g-5")
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "PR 42 のレビュー")
+        }
+
+        await TestKit.shared.run("grok: falls back to the first human message") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(
+                id: "g-6", updatedSecondsAgo: 300, summary: "",
+                history: [
+                    #"{"type":"user","content":"<system-reminder>\nbackground context\n</system-reminder>"}"#,
+                    #"{"type":"user","content":"<user_query>ログイン画面を直して</user_query>"}"#,
+                ])
+            try writeGrokActive(sessionId: "g-6")
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "ログイン画面を直して")
+        }
+
+        await TestKit.shared.run("grok: a JSON payload is not a summary") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(
+                id: "g-7", updatedSecondsAgo: 300, summary: "",
+                generatedTitle: #"{\"type\": \"busy\", \"pgid\": 20100}"#,
+                history: [#"{"type":"user","content":"{\"type\": \"busy\", \"pgid\": 20100}"}"#])
+            try writeGrokActive(sessionId: "g-7")
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "(無題)")
+        }
+
+        await TestKit.shared.run("claudeCode: slash command turn is not a title") { [self] in
+            try setUp()
+            defer { tearDown() }
+            let file = tempDir.appendingPathComponent("proj/s-9.jsonl")
+            let caveat =
+                "<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>\n<command-name>/clear</command-name>\n<command-args></command-args>"
+            try write(
+                [
+                    """
+                    {"type":"user","sessionId":"s-9","cwd":"/Users/alex/src/demo","timestamp":"\(iso(300))","message":{"role":"user","content":"\(caveat)"}}
+                    """,
+                    claudeUserLine("認証まわりのテストを追加して", secondsAgo: 290),
+                    claudeAssistantLine("追加しました", secondsAgo: 280),
+                ], to: file)
+            let adapter = ClaudeCodeAdapter(root: tempDir, config: .default)
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "認証まわりのテストを追加して")
+        }
+
+        await TestKit.shared.run("codex: title from a response_item user turn") { [self] in
+            try setUp()
+            defer { tearDown() }
+            let file = codexShardPath("rollout-3.jsonl")
+            try write(
+                [
+                    """
+                    {"timestamp":"\(iso(300))","type":"session_meta","payload":{"id":"c-3","cwd":"/Users/alex/src/demo"}}
+                    """,
+                    """
+                    {"timestamp":"\(iso(290))","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"system rules"}]}}
+                    """,
+                    """
+                    {"timestamp":"\(iso(285))","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /Users/alex/src/demo\\n<INSTRUCTIONS>\\nbe careful\\n</INSTRUCTIONS>"}]}}
+                    """,
+                    """
+                    {"timestamp":"\(iso(280))","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"パーサのバグを直して"}]}}
+                    """,
+                ], to: file)
+            let adapter = CodexAdapter(root: tempDir, config: .default)
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "パーサのバグを直して")
+        }
+
+        await TestKit.shared.run("codex: machine-driven turn stays untitled") { [self] in
+            try setUp()
+            defer { tearDown() }
+            let file = codexShardPath("rollout-4.jsonl")
+            try write(
+                [
+                    """
+                    {"timestamp":"\(iso(300))","type":"session_meta","payload":{"id":"c-4","cwd":"/Users/alex/src/demo"}}
+                    """,
+                    """
+                    {"timestamp":"\(iso(290))","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n<cwd>/Users/alex/src/demo</cwd>\\n</environment_context>"}]}}
+                    """,
+                    """
+                    {"timestamp":"\(iso(280))","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"{\\"type\\": \\"busy\\", \\"pgid\\": 20100}"}]}}
+                    """,
+                ], to: file)
+            let adapter = CodexAdapter(root: tempDir, config: .default)
+            let session = try unwrap(try adapter.scan(now: now).first)
+            expectEqual(session.title, "(無題)")
+        }
+
         await TestKit.shared.run("statusResolver: ordering") { [self] in
             let config = ScanConfig.default
             expectEqual(
@@ -270,19 +374,21 @@ final class AdapterTests {
     // MARK: - Grok fixtures
 
     private func makeGrokSession(
-        id: String, updatedSecondsAgo: TimeInterval, summary: String, isSubagent: Bool = false
+        id: String, updatedSecondsAgo: TimeInterval, summary: String, isSubagent: Bool = false,
+        generatedTitle: String? = nil, history: [String]? = nil
     ) throws {
         let dir = tempDir.appendingPathComponent("sessions/%2FUsers%2Falex/\(id)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let kind = isSubagent ? #","session_kind":"subagent","agent_name":"general-purpose""# : ""
+        let generated = generatedTitle.map { #","generated_title":"\#($0)""# } ?? ""
         let summaryJSON = """
-            {"info":{"id":"\(id)","cwd":"/Users/alex/src/demo"},"session_summary":"\(summary)","updated_at":"\(iso(updatedSecondsAgo))","last_turn_summary":"確認待ち"\(kind)}
+            {"info":{"id":"\(id)","cwd":"/Users/alex/src/demo"},"session_summary":"\(summary)","updated_at":"\(iso(updatedSecondsAgo))","last_turn_summary":"確認待ち"\(generated)\(kind)}
             """
         try summaryJSON.write(
             to: dir.appendingPathComponent("summary.json"),
             atomically: true, encoding: .utf8)
         try write(
-            [
+            history ?? [
                 #"{"type":"user","content":"review PR 42"}"#,
                 #"{"type":"assistant","content":"looked at the diff"}"#,
             ], to: dir.appendingPathComponent("chat_history.jsonl"))

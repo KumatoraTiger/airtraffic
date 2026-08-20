@@ -117,7 +117,13 @@ public final class ClaudeCodeAdapter: AgentAdapter {
             let (text, toolResultIds) = Self.userContent(message["content"])
             for id in toolResultIds { state.pendingToolUseIds.remove(id) }
             if !text.isEmpty {
-                if state.firstUserText == nil { state.firstUserText = text }
+                // A turn opened by a slash command carries the CLI's caveat and
+                // command markers before anything the user typed; the title
+                // comes from the first turn that survives that filter.
+                if state.firstUserText == nil {
+                    let human = PromptText.humanLine(text)
+                    if !human.isEmpty { state.firstUserText = human }
+                }
                 state.lastUserText = text
                 state.lastRoleIsAssistant = false
             }

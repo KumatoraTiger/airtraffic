@@ -747,6 +747,19 @@ struct ServiceTests {
             expect(long.count <= 12, "a very long window must not flood the axis")
         }
 
+        await TestKit.shared.run("board: untitled sessions never merge") { [self] in
+            let entries = BoardAssembler.assemble(
+                tasks: [],
+                sessions: [
+                    session(id: "codex:a", title: "(無題)"),
+                    session(id: "codex:b", title: "(無題)"),
+                ])
+            expectEqual(entries.count, 2)
+            expect(
+                entries.allSatisfy { $0.title == "無題のセッション" },
+                "a placeholder title should read as one on the board")
+        }
+
         await TestKit.shared.run("board: subtasks hang under their parent row") {
             let tasks = [
                 task(id: "t-1", title: "認証を直す"),

@@ -248,8 +248,7 @@ public struct DailyReporter: Sendable {
     /// Titles that name no work: placeholders the agents write when a session
     /// has no first user message yet.
     private func isMeaningful(_ title: String) -> Bool {
-        let stripped = title.trimmingCharacters(in: CharacterSet(charactersIn: "()（） 　"))
-        return !stripped.isEmpty && stripped != "無題" && stripped != "Untitled"
+        !TitleCleaner.isPlaceholder(title)
     }
 
     /// The merge key for a piece of work. A PR or issue number identifies the

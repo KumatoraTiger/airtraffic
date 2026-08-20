@@ -14,6 +14,7 @@ public final class GrokAdapter: AgentAdapter {
 
     private final class State {
         var offset: UInt64 = 0
+        var firstUserText = ""
         var lastUserText = ""
         var lastAssistantText = ""
     }
@@ -111,10 +112,13 @@ public final class GrokAdapter: AgentAdapter {
             status = .idle
         }
 
-        let title =
-            summary["session_summary"] as? String
-            ?? summary["generated_title"] as? String
-            ?? state.lastUserText
+        // Grok writes `session_summary` as an empty string until it has one,
+        // and `??` only falls back on a missing key, so the empty value has to
+        // be rejected explicitly or the two later sources are never reached.
+        let title = firstHumanTitle(
+            summary["session_summary"] as? String,
+            summary["generated_title"] as? String,
+            state.firstUserText)
         let lastTurnSummary = summary["last_turn_summary"] as? String ?? ""
         let cwd = (summary["info"] as? [String: Any])?["cwd"] as? String ?? ""
 
@@ -145,12 +149,26 @@ public final class GrokAdapter: AgentAdapter {
         guard !text.isEmpty else { return }
         switch object["type"] as? String {
         case "user":
+            if state.firstUserText.isEmpty {
+                state.firstUserText = PromptText.humanLine(text)
+            }
             state.lastUserText = text
         case "assistant":
             state.lastAssistantText = text
         default:
             break
         }
+    }
+
+    /// First candidate that names something a person asked for, or "".
+    /// Grok derives `session_summary` from the first message, so a session
+    /// driven by a JSON payload carries that payload as its summary.
+    private func firstHumanTitle(_ candidates: String?...) -> String {
+        for candidate in candidates {
+            let line = PromptText.humanLine(candidate ?? "")
+            if !line.isEmpty { return line }
+        }
+        return ""
     }
 
     private func isDirectory(_ url: URL) -> Bool {
