@@ -437,8 +437,9 @@ final class AppModel {
             let commits = await Task.detached {
                 log.commitsToday(paths: Array(repoPaths))
             }.value
+            let completed = completedToday
             let input = reporter.reportInput(
-                completed: completedToday, plan: plan, commits: commits)
+                completed: completed, plan: plan, commits: commits)
             let reply = try await client.complete(
                 LLMRequest(
                     system: reporter.systemPrompt(),
@@ -446,7 +447,8 @@ final class AppModel {
                     maxTokens: 4096))
             if let parsed = reporter.parseReport(from: reply) {
                 report = parsed
-                reportMetrics = DayMetrics.build(plan: plan, commits: commits)
+                reportMetrics = DayMetrics.build(
+                    plan: plan, commits: commits, completedTasks: completed.count)
                 reportFallback = nil
             } else {
                 report = nil

@@ -3,7 +3,7 @@ import Foundation
 /// What kind of work a session is doing, from a fixed vocabulary. Fixed so
 /// rows line up: scanning the board vertically reads as "three reviews, one
 /// design" instead of seven differently-worded blurbs.
-public enum WorkKind: String, CaseIterable, Sendable {
+public enum WorkKind: String, Codable, CaseIterable, Sendable {
     case review
     case design
     case implement
@@ -11,6 +11,22 @@ public enum WorkKind: String, CaseIterable, Sendable {
     case fix
     case ops
     case other
+
+    /// Reads a kind from whatever the LLM wrote: the raw case, the Japanese
+    /// display name, or a near miss. Anything unrecognized is `other`, which
+    /// is a category rather than an error.
+    public init(loose text: String) {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let match = WorkKind(rawValue: cleaned) {
+            self = match
+            return
+        }
+        if let match = WorkKind.allCases.first(where: { $0.displayName == cleaned }) {
+            self = match
+            return
+        }
+        self = .other
+    }
 
     public var displayName: String {
         switch self {

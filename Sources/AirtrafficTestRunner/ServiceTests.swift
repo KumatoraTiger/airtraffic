@@ -524,19 +524,42 @@ struct ServiceTests {
             let reply = """
                 ```json
                 {"date": "2026-08-19 (水) 18:53 時点", "mid_day": true,
-                 "summary": "今日は PR #123 の移行が中心だった。",
-                 "achievements": [{"title": "PR #123", "detail": "指摘3件を反映した。",
-                                   "meta": ["webapp", "3セッション"]}],
-                 "stuck": [], "observations": ["同じPRに3セッション使っている"]}
+                 "headline": "認証APIの移行が中心の日。",
+                 "themes": [{"kind": "実装", "title": "移行をレビュー指摘まで通した",
+                             "body": "指摘3件を反映した。",
+                             "evidence": ["webapp", "3セッション"]}],
+                 "timeline": [{"time": "14:02", "title": "実装に着手", "note": "差分を絞った。"}],
+                 "stuck": [], "closing": "レビューの往復に時間が寄った。"}
                 ```
                 """
             let report = try unwrap(reporter.parseReport(from: reply))
             expect(report.midDay, "mid_day should decode")
-            expectEqual(report.achievements.count, 1)
-            expectEqual(report.achievements.first?.meta, ["webapp", "3セッション"])
+            expectEqual(report.headline, "認証APIの移行が中心の日。")
+            expectEqual(report.themes.count, 1)
+            // The kind arrived as its Japanese display name, not its raw case.
+            expectEqual(report.themes.first?.kind, .implement)
+            expectEqual(report.themes.first?.evidence, ["webapp", "3セッション"])
+            expectEqual(report.timeline.first?.time, "14:02")
+            expectEqual(report.closing, "レビューの往復に時間が寄った。")
             // carry_over was absent: a thin report, not a parse failure.
             expect(report.carryOver.isEmpty, "a missing section should decode as empty")
-            expectEqual(report.observations.count, 1)
+        }
+
+        await TestKit.shared.run("reporter: an answer in the older shape still reads") {
+            let reporter = DailyReporter()
+            let reply = """
+                {"date": "2026-08-19 (水)",
+                 "summary": "今日は PR #123 が中心だった。\\n\\n夕方は調査に寄った。",
+                 "achievements": [{"title": "PR #123", "detail": "指摘3件を反映した。",
+                                   "meta": ["webapp"]}]}
+                """
+            let report = try unwrap(reporter.parseReport(from: reply))
+            expectEqual(report.headline, "今日は PR #123 が中心だった。")
+            expectEqual(report.closing, "夕方は調査に寄った。")
+            expectEqual(report.themes.count, 1)
+            expectEqual(report.themes.first?.title, "PR #123")
+            // Nothing said which kind it was, so it stays uncategorized.
+            expectEqual(report.themes.first?.kind, .other)
         }
 
         await TestKit.shared.run("reporter: an unusable reply parses to nil") {
@@ -545,45 +568,90 @@ struct ServiceTests {
                 reporter.parseReport(from: "## 完了したこと\n- なにか") == nil,
                 "prose should not be accepted as a report")
             expect(
-                reporter.parseReport(from: "{\"summary\": \"\"}") == nil,
+                reporter.parseReport(from: "{\"headline\": \"\"}") == nil,
                 "an object with nothing usable should be rejected")
         }
 
         await TestKit.shared.run("renderer: the page is self-contained and escapes text") {
             let report = DailyReport(
                 date: "2026-08-19 (水) 18:53", midDay: true,
-                summary: ["今日は <script> の混入を試した。", "2段落目。"],
-                achievements: [
-                    ReportEntry(
-                        title: "PR #123", detail: "指摘3件を反映した。",
-                        meta: ["webapp", "5コミット"])
+                headline: "今日は <script> の混入を試した。",
+                themes: [
+                    ReportTheme(
+                        kind: .review, title: "PR #123 を通した", body: "指摘3件を反映した。",
+                        evidence: ["webapp", "5コミット"])
                 ],
-                stuck: [], carryOver: [], observations: ["同じPRに3セッション"])
+                timeline: [TimelineNote(time: "14:02", title: "着手", note: "差分を絞った。")],
+                stuck: [ReportEntry(title: "確認待ちの調査", detail: "3時間止まっている。")],
+                closing: "レビューに時間が寄った。")
             let html = DailyReportRenderer.html(report)
             expect(html.hasPrefix("<!doctype html>"), "a standalone page should be produced")
             expect(!html.contains("http://"), "the page must not reference remote assets")
             expect(!html.contains("<script>"), "text must be escaped, not rendered as markup")
             expect(html.contains("&lt;script&gt;"), "the escaped form should be present")
             expect(html.contains("途中経過"), "a mid-day report should say so")
-            expect(html.contains("（なし）"), "an empty section should render its empty state")
-            expect(html.contains("5コミット"), "meta badges should render")
-            expectEqual(html.components(separatedBy: "<p>今日は").count - 1, 1)
-            expect(html.contains("<p>2段落目。</p>"), "the second paragraph should stand alone")
+            expect(html.contains("class=\"lead\""), "the headline should be the lead")
+            expect(html.contains("レビュー</span>"), "the kind should be spelled out on the card")
+            expect(html.contains("根拠: webapp · 5コミット"), "evidence should be listed")
+            expect(html.contains("14:02"), "the narrative timeline should carry its times")
+            expect(html.contains("詰まっているところ"), "a non-empty entry group should appear")
+            expect(html.contains("明日に持ち越し") == false, "an empty group should be omitted")
+            expect(html.contains("まとめ"), "the closing should be present")
+        }
+
+        await TestKit.shared.run("renderer: a theme's accent follows its kind, not its order") {
+            func slot(_ kind: WorkKind) -> String? {
+                let html = DailyReportRenderer.html(
+                    DailyReport(date: "d", themes: [ReportTheme(kind: kind, title: "t")]))
+                for name in ["s1", "s2", "s3", "neutral"]
+                where html.contains("<article class=\"card \(name)\">") {
+                    return name
+                }
+                return nil
+            }
+            expectEqual(slot(.implement), "s1")
+            expectEqual(slot(.design), "s1")
+            expectEqual(slot(.fix), "s2")
+            expectEqual(slot(.review), "s3")
+            expectEqual(slot(.other), "neutral")
+        }
+
+        await TestKit.shared.run("renderer: the tiles count the day from the facts") {
+            let now = Date()
+            let metrics = DayMetrics(
+                dayStart: now.addingTimeInterval(-3600), now: now,
+                plannedWorked: 2, plannedUntouched: 1, unplanned: 3,
+                commits: [RepoCommits(path: "/tmp/a", name: "webapp", subjects: [], total: 7)],
+                completedTasks: 4, sessions: 9)
+            let html = DailyReportRenderer.html(DailyReport(date: "d"), metrics: metrics)
+            expect(html.contains("<b>4</b><span>完了したタスク</span>"), "completed tasks")
+            expect(html.contains("<b>5</b><span>動いた作業</span>"), "planned plus unplanned work")
+            expect(html.contains("<b>9</b><span>セッション</span>"), "session count")
+            expect(html.contains("<b>7</b><span>コミット</span>"), "commit total")
+            // Two repositories or fewer say nothing a number did not.
+            expect(!html.contains("class=\"figure commits\""), "one repo needs no bar chart")
         }
 
         await TestKit.shared.run("renderer: markdown keeps every section for pasting") {
             let report = DailyReport(
-                date: "2026-08-19 (水)", summary: ["概要の文。", "続きの段落。"],
-                achievements: [ReportEntry(title: "PR #123", detail: "反映した。", meta: ["3件"])],
-                carryOver: [ReportEntry(title: "baseline修正", detail: "手が付かなかった。")])
+                date: "2026-08-19 (水)", headline: "概要の文。",
+                themes: [
+                    ReportTheme(
+                        kind: .implement, title: "PR #123", body: "反映した。",
+                        evidence: ["3件"])
+                ],
+                timeline: [TimelineNote(time: "14:02", title: "着手")],
+                carryOver: [ReportEntry(title: "設定値の切り替え", detail: "手が付かなかった。")],
+                closing: "調査に寄った日。")
             let markdown = DailyReportRenderer.markdown(report)
             expect(markdown.contains("# 日報 2026-08-19 (水)"), "the date line should be present")
-            expect(
-                markdown.contains("概要の文。\n\n続きの段落。"),
-                "summary paragraphs should be separated by a blank line")
-            expect(markdown.contains("**PR #123** 反映した。（3件）"), "entries should carry meta")
+            expect(markdown.contains("\n概要の文。\n"), "the headline should stand alone")
+            expect(markdown.contains("### [実装] PR #123"), "themes should carry their kind")
+            expect(markdown.contains("根拠: 3件"), "evidence should be listed")
+            expect(markdown.contains("- 14:02 着手"), "the timeline should be present")
             expect(markdown.contains("## 詰まっているところ\n（なし）"), "empty sections should be named")
-            expect(markdown.contains("baseline修正"), "carry-over should be present")
+            expect(markdown.contains("設定値の切り替え"), "carry-over should be present")
+            expect(markdown.hasSuffix("調査に寄った日。\n"), "the closing should end the document")
         }
 
         await TestKit.shared.run("metrics: the timeline keeps the longest work in time order") {
@@ -642,7 +710,7 @@ struct ServiceTests {
                     RepoCommits(path: "/tmp/demo", name: "demo", subjects: ["a"], total: 5)
                 ])
             let html = DailyReportRenderer.html(
-                DailyReport(date: "2026-08-19 (水)", summary: ["概要。"]), metrics: metrics)
+                DailyReport(date: "2026-08-19 (水)", headline: "概要。"), metrics: metrics)
             expect(html.contains("時間の使いみち"), "the timeline should be present")
             expect(html.contains("予定と実際"), "the plan split should be present")
             expect(html.contains("コミット"), "the commit bars should be present")

@@ -38,6 +38,11 @@ public struct DayMetrics: Sendable {
     public var unplanned: Int
     /// Commits per repository, largest first.
     public var commits: [RepoCommits]
+    /// Tasks the user finished today.
+    public var completedTasks: Int
+    /// Sessions behind the day's work, after merging by target: the number of
+    /// separate agent conversations the day took.
+    public var sessions: Int
 
     /// How many bars a timeline shows before the rest are dropped. Beyond a
     /// handful the rows stop being readable, and the entry lists carry the
@@ -47,7 +52,7 @@ public struct DayMetrics: Sendable {
     public init(
         timeline: [Bar] = [], dayStart: Date, now: Date,
         plannedWorked: Int = 0, plannedUntouched: Int = 0, unplanned: Int = 0,
-        commits: [RepoCommits] = []
+        commits: [RepoCommits] = [], completedTasks: Int = 0, sessions: Int = 0
     ) {
         self.timeline = timeline
         self.dayStart = dayStart
@@ -56,7 +61,15 @@ public struct DayMetrics: Sendable {
         self.plannedUntouched = plannedUntouched
         self.unplanned = unplanned
         self.commits = commits
+        self.completedTasks = completedTasks
+        self.sessions = sessions
     }
+
+    /// Total commits across every repository touched today.
+    public var commitTotal: Int { commits.reduce(0) { $0 + $1.total } }
+
+    /// Pieces of work the day touched, planned or not.
+    public var workItems: Int { plannedWorked + unplanned }
 
     /// True when there is nothing worth drawing.
     public var isEmpty: Bool { timeline.isEmpty && commits.isEmpty }
@@ -78,7 +91,7 @@ public struct DayMetrics: Sendable {
     /// the timeline is for seeing where the day went, so the longest stretches
     /// are the ones that must survive the cut.
     public static func build(
-        plan: DailyReporter.PlanComparison, commits: [RepoCommits],
+        plan: DailyReporter.PlanComparison, commits: [RepoCommits], completedTasks: Int = 0,
         now: Date = Date(), calendar: Calendar = .current
     ) -> DayMetrics {
         let planned = plan.worked.flatMap(\.activity)
@@ -101,6 +114,8 @@ public struct DayMetrics: Sendable {
         return DayMetrics(
             timeline: bars, dayStart: calendar.startOfDay(for: now), now: now,
             plannedWorked: plan.worked.count, plannedUntouched: plan.untouched.count,
-            unplanned: plan.unplanned.count, commits: commits)
+            unplanned: plan.unplanned.count, commits: commits,
+            completedTasks: completedTasks,
+            sessions: items.reduce(0) { $0 + $1.sessionCount })
     }
 }
