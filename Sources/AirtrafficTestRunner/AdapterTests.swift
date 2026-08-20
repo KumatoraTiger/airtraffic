@@ -232,6 +232,20 @@ final class AdapterTests {
             expectEqual(session.status, .idle)
         }
 
+        await TestKit.shared.run("grok: skips subagent sessions") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(id: "g-3", updatedSecondsAgo: 300, summary: "Watch PR 42 CI")
+            try makeGrokSession(
+                id: "g-4", updatedSecondsAgo: 300, summary: "PR 42 review verdicts",
+                isSubagent: true)
+            try writeGrokActive(sessionId: "g-3")
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            let sessions = try adapter.scan(now: now)
+            expectEqual(sessions.count, 1)
+            expectEqual(sessions.first?.id, "grok:g-3")
+        }
+
         await TestKit.shared.run("statusResolver: ordering") { [self] in
             let config = ScanConfig.default
             expectEqual(
@@ -256,12 +270,13 @@ final class AdapterTests {
     // MARK: - Grok fixtures
 
     private func makeGrokSession(
-        id: String, updatedSecondsAgo: TimeInterval, summary: String
+        id: String, updatedSecondsAgo: TimeInterval, summary: String, isSubagent: Bool = false
     ) throws {
         let dir = tempDir.appendingPathComponent("sessions/%2FUsers%2Falex/\(id)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let kind = isSubagent ? #","session_kind":"subagent","agent_name":"general-purpose""# : ""
         let summaryJSON = """
-            {"info":{"id":"\(id)","cwd":"/Users/alex/src/demo"},"session_summary":"\(summary)","updated_at":"\(iso(updatedSecondsAgo))","last_turn_summary":"確認待ち"}
+            {"info":{"id":"\(id)","cwd":"/Users/alex/src/demo"},"session_summary":"\(summary)","updated_at":"\(iso(updatedSecondsAgo))","last_turn_summary":"確認待ち"\(kind)}
             """
         try summaryJSON.write(
             to: dir.appendingPathComponent("summary.json"),

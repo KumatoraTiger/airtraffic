@@ -2,6 +2,7 @@ import Foundation
 
 /// Reads Grok CLI sessions: `<home>/sessions/<urlencoded-cwd>/<session-id>/`
 /// containing `summary.json` (metadata) and `chat_history.jsonl` (messages).
+/// Subagent sessions live in the same tree and carry `session_kind: "subagent"`.
 /// `<home>/active_sessions.json` lists sessions with a live CLI process.
 public final class GrokAdapter: AgentAdapter {
     public let kind: AgentKind = .grok
@@ -74,6 +75,10 @@ public final class GrokAdapter: AgentAdapter {
         guard let data = try? Data(contentsOf: summaryURL),
             let summary = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return nil }
+
+        // Grok writes subagent transcripts next to real sessions; they are
+        // internal machinery, not work the user drives.
+        if summary["session_kind"] as? String == "subagent" { return nil }
 
         let sessionId =
             (summary["info"] as? [String: Any])?["id"] as? String
