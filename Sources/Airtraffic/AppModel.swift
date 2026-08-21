@@ -68,6 +68,23 @@ final class AppModel {
     /// and pins the main thread.
     var pomodoroNow = Date()
     var lastError: String?
+    /// Task edits that can be taken back, oldest first. Only the task list is
+    /// covered: it is the only thing the user edits by hand, and a mistake
+    /// there (a task completed too early, a session linked to the wrong task,
+    /// a task hung under the wrong parent) is otherwise unrecoverable.
+    private(set) var undoStack: [UndoStep] = []
+    /// Undone edits, for putting back. An undo is itself an action the user
+    /// can regret.
+    private(set) var redoStack: [UndoStep] = []
+    /// How far back the history goes. Deep enough to cover a wrong move a few
+    /// actions ago, short enough to stay understandable.
+    private static let historyDepth = 20
+
+    var canUndo: Bool { !undoStack.isEmpty }
+    var canRedo: Bool { !redoStack.isEmpty }
+    /// What 「元に戻す」 would take back right now, for the menu and the button.
+    var undoLabel: String? { undoStack.last?.label }
+    var redoLabel: String? { redoStack.last?.label }
     var labelingEnabled: Bool {
         didSet { UserDefaults.standard.set(labelingEnabled, forKey: "labelingEnabled") }
     }
@@ -238,32 +255,40 @@ final class AppModel {
     // MARK: - Task actions
 
     func addManualTask(title: String) async {
-        guard let store, !title.isEmpty else { return }
-        let task = TaskItem(
-            id: UUID().uuidString, title: title, detail: "", status: .todo, rank: nil,
-            source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: [])
-        try? await store.upsertTask(task)
-        await refreshLists()
+        await edit("タスクの追加") {
+            guard let store, !title.isEmpty else { return }
+            let task = TaskItem(
+                id: UUID().uuidString, title: title, detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: [])
+            try? await store.upsertTask(task)
+            await refreshLists()
+        }
     }
 
     /// Adds a subtask under `parent`, at the end of its sibling list.
     /// Only one level deep: a subtask's own subtask lands under the same
     /// parent instead of nesting further.
     func addSubtask(of parent: TaskItem, title: String) async {
-        guard let store, !title.isEmpty else { return }
-        let parentId = parent.parentId ?? parent.id
-        let task = TaskItem(
-            id: UUID().uuidString, title: title, detail: "", status: .todo,
-            rank: nextSiblingRank(parentId: parentId),
-            source: .manual, createdAt: Date(), updatedAt: Date(),
-            parentId: parentId, sessionIds: [])
-        try? await store.upsertTask(task)
-        await refreshLists()
+        await edit("サブタスクの追加") {
+            guard let store, !title.isEmpty else { return }
+            let parentId = parent.parentId ?? parent.id
+            let task = TaskItem(
+                id: UUID().uuidString, title: title, detail: "", status: .todo,
+                rank: nextSiblingRank(parentId: parentId),
+                source: .manual, createdAt: Date(), updatedAt: Date(),
+                parentId: parentId, sessionIds: [])
+            try? await store.upsertTask(task)
+            await refreshLists()
+        }
     }
 
     /// Swaps a subtask with its neighbour. Sibling order is the rank column,
     /// same as the top-level list, so a move is a rewrite of both ranks.
     func moveSubtask(_ task: TaskItem, up: Bool) async {
+        await edit("サブタスクの並べ替え") { await performMoveSubtask(task, up: up) }
+    }
+
+    private func performMoveSubtask(_ task: TaskItem, up: Bool) async {
         guard let store, let parentId = task.parentId else { return }
         let siblings = subtasks(of: parentId)
         guard let index = siblings.firstIndex(where: { $0.id == task.id }) else { return }
@@ -282,27 +307,31 @@ final class AppModel {
 
     /// Detaches a subtask, putting it back on the top-level list.
     func promoteSubtask(_ task: TaskItem) async {
-        guard let store, task.parentId != nil else { return }
-        var updated = task
-        updated.parentId = nil
-        updated.rank = nil
-        updated.updatedAt = Date()
-        try? await store.upsertTask(updated)
-        await refreshLists()
+        await edit("サブタスクの解除") {
+            guard let store, task.parentId != nil else { return }
+            var updated = task
+            updated.parentId = nil
+            updated.rank = nil
+            updated.updatedAt = Date()
+            try? await store.upsertTask(updated)
+            await refreshLists()
+        }
     }
 
     /// Hangs an existing top-level task under another one, at the end of its
     /// subtasks. A task with subtasks of its own is not offered as a child,
     /// so nesting stays one level deep.
     func nestTask(_ task: TaskItem, under parent: TaskItem) async {
-        guard let store, task.id != parent.id, parent.parentId == nil else { return }
-        var updated = task
-        updated.parentId = parent.id
-        updated.isToday = false
-        updated.rank = nextSiblingRank(parentId: parent.id)
-        updated.updatedAt = Date()
-        try? await store.upsertTask(updated)
-        await refreshLists()
+        await edit("サブタスク化") {
+            guard let store, task.id != parent.id, parent.parentId == nil else { return }
+            var updated = task
+            updated.parentId = parent.id
+            updated.isToday = false
+            updated.rank = nextSiblingRank(parentId: parent.id)
+            updated.updatedAt = Date()
+            try? await store.upsertTask(updated)
+            await refreshLists()
+        }
     }
 
     /// Subtasks of a parent, in display order.
@@ -317,6 +346,12 @@ final class AppModel {
     /// Puts a task into (or takes it out of) the 「今日やる」 section. The flag
     /// sticks across days until the user flips it back.
     func setTaskToday(_ task: TaskItem, _ isToday: Bool) async {
+        await edit(isToday ? "今日やるに追加" : "今日やるから外す") {
+            await performSetTaskToday(task, isToday)
+        }
+    }
+
+    private func performSetTaskToday(_ task: TaskItem, _ isToday: Bool) async {
         guard let store else { return }
         var updated = task
         updated.isToday = isToday
@@ -332,6 +367,15 @@ final class AppModel {
     /// from it: crossing the divider beats a plain reorder as the signal.
     func applyBoardOrder(
         todayIds: [String], laterIds: [String], movedId: String? = nil, movedUp: Bool? = nil
+    ) async {
+        await edit("並べ替え") {
+            await performBoardOrder(
+                todayIds: todayIds, laterIds: laterIds, movedId: movedId, movedUp: movedUp)
+        }
+    }
+
+    private func performBoardOrder(
+        todayIds: [String], laterIds: [String], movedId: String?, movedUp: Bool?
     ) async {
         guard let store else { return }
         if let movedId, let moved = tasks.first(where: { $0.id == movedId }) {
@@ -358,17 +402,32 @@ final class AppModel {
 
     /// Completing a parent completes its open subtasks; see `TaskStatusChange`.
     func setTaskStatus(_ task: TaskItem, _ status: TaskStatus) async {
-        guard let store else { return }
-        for updated in TaskStatusChange.apply(status, to: task, in: tasks) {
-            try? await store.upsertTask(updated)
+        await edit(statusEditLabel(status)) {
+            guard let store else { return }
+            for updated in TaskStatusChange.apply(status, to: task, in: tasks) {
+                try? await store.upsertTask(updated)
+            }
+            await refreshLists()
         }
-        await refreshLists()
+    }
+
+    private func statusEditLabel(_ status: TaskStatus) -> String {
+        switch status {
+        case .done: "完了"
+        case .archived: "アーカイブ"
+        case .inProgress: "着手"
+        case .todo: "未着手に戻す"
+        }
     }
 
     /// Persists an auto-materialized entry as a task, so it survives its
     /// sessions going quiet. Also the way an aged-out entry is brought back
     /// from the 完了 section.
     func keepEntry(_ entry: BoardEntry) async {
+        await edit("タスクにする") { await performKeepEntry(entry) }
+    }
+
+    private func performKeepEntry(_ entry: BoardEntry) async {
         guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
         let task = TaskItem(
             id: UUID().uuidString, title: entry.title, detail: "",
@@ -383,18 +442,24 @@ final class AppModel {
     /// disappears into the task, which shows them as its executions from then
     /// on — and keeps them until the task itself is done.
     func linkEntry(_ entry: BoardEntry, to task: TaskItem) async {
-        guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
-        var updated = task
-        updated.sessionIds.append(contentsOf: entry.sessions.map(\.id))
-        updated.updatedAt = Date()
-        try? await store.upsertTask(updated)
-        await refreshLists()
+        await edit("タスクへの紐づけ") {
+            guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
+            var updated = task
+            updated.sessionIds.append(contentsOf: entry.sessions.map(\.id))
+            updated.updatedAt = Date()
+            try? await store.upsertTask(updated)
+            await refreshLists()
+        }
     }
 
     /// Promote a session's in-transcript todo into a global task. When the
     /// session already hangs under a task, the todo becomes a subtask of it —
     /// which is where a promoted todo belongs.
     func promoteTodo(_ todo: TodoItem, from session: SessionSnapshot) async {
+        await edit("todo の昇格") { await performPromoteTodo(todo, from: session) }
+    }
+
+    private func performPromoteTodo(_ todo: TodoItem, from session: SessionSnapshot) async {
         guard let store else { return }
         let done = todo.status == .completed
         let parent = owningTask(of: session)
@@ -466,6 +531,69 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    // MARK: - Undo
+
+    /// Runs a task edit and records how to take it back.
+    ///
+    /// The action is not asked to describe its own inverse: the task list and
+    /// the preference notes are compared before and after, and the difference
+    /// is what undo writes back. An action that changed nothing records
+    /// nothing, so 「元に戻す」 never spends a step on a no-op.
+    private func edit(_ label: String, _ body: () async -> Void) async {
+        let tasksBefore = tasks
+        let preferenceIdsBefore = Set(preferences.map(\.id))
+        await body()
+        let step = UndoStep.between(
+            before: tasksBefore, after: tasks, label: label,
+            addedPreferenceIds: preferences.map(\.id).filter {
+                !preferenceIdsBefore.contains($0)
+            })
+        guard !step.isEmpty else { return }
+        undoStack.append(step)
+        if undoStack.count > Self.historyDepth { undoStack.removeFirst() }
+        // A new edit branches the history: what was undone before it can no
+        // longer be put back on top of a different list.
+        redoStack.removeAll()
+    }
+
+    /// Takes back the last task edit. The edit that would put it back lands on
+    /// the redo stack.
+    func undoLastEdit() async {
+        guard let step = undoStack.popLast() else { return }
+        let before = tasks
+        await apply(step)
+        redoStack.append(UndoStep.between(before: before, after: tasks, label: step.label))
+    }
+
+    /// Puts back the last undone edit.
+    func redoLastEdit() async {
+        guard let step = redoStack.popLast() else { return }
+        let before = tasks
+        await apply(step)
+        undoStack.append(UndoStep.between(before: before, after: tasks, label: step.label))
+    }
+
+    /// Writes one step: rows the action created go first, so a restored parent
+    /// never lands next to a child the action invented.
+    private func apply(_ step: UndoStep) async {
+        guard let store else { return }
+        for id in step.removeIds {
+            try? await store.deleteTask(id)
+        }
+        for task in step.restore {
+            try? await store.restoreTask(task)
+        }
+        for id in step.removePreferenceIds {
+            try? await store.deletePreference(id)
+        }
+        // A pomodoro pointed at a task the undo removed has nothing left to
+        // count down for.
+        if let pomodoro, step.removeIds.contains(pomodoro.taskId) {
+            self.pomodoro = nil
+        }
+        await refreshLists()
     }
 
     private func refreshLists() async {
@@ -565,11 +693,13 @@ final class AppModel {
     }
 
     func applyRanking(_ orderedTaskIds: [String]) async {
-        guard let store else { return }
-        let known = Set(tasks.map(\.id))
-        let valid = orderedTaskIds.filter { known.contains($0) }
-        guard !valid.isEmpty else { return }
-        try? await store.setRanks(valid)
-        await refreshLists()
+        await edit("AI 提案の並び順を適用") {
+            guard let store else { return }
+            let known = Set(tasks.map(\.id))
+            let valid = orderedTaskIds.filter { known.contains($0) }
+            guard !valid.isEmpty else { return }
+            try? await store.setRanks(valid)
+            await refreshLists()
+        }
     }
 }

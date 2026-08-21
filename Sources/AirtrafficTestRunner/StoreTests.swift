@@ -139,5 +139,45 @@ struct StoreTests {
             fetched = try await store.tasks()
             expect(fetched.first { $0.id == "t-2" }?.parentId == nil, "the link should be gone")
         }
+        await TestKit.shared.run("store: restoreTask drops the links the row lost") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            var task = TaskItem(
+                id: "t-1", title: "認証を直す", detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(),
+                sessionIds: ["claude:s-1", "claude:s-2"]
+            )
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.sessionIds.count, 2)
+
+            // upsertTask only ever adds links, so taking a wrong 紐づけ back
+            // needs restoreTask.
+            task.sessionIds = ["claude:s-1"]
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.sessionIds.count, 2)
+            try await store.restoreTask(task)
+            expectEqual(try await store.tasks().first?.sessionIds, ["claude:s-1"])
+        }
+
+        await TestKit.shared.run("store: deleteTask removes the row and its links") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let task = TaskItem(
+                id: "t-1", title: "認証を直す", detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(),
+                sessionIds: ["claude:s-1"]
+            )
+            try await store.upsertTask(task)
+            try await store.deleteTask("t-1")
+            expect(try await store.tasks(includeArchived: true).isEmpty, "the row is gone")
+
+            // A new task reusing the session must not inherit the old links.
+            let reused = TaskItem(
+                id: "t-2", title: "認証を直す", detail: "", status: .todo, rank: nil,
+                source: .manual, createdAt: Date(), updatedAt: Date(), sessionIds: []
+            )
+            try await store.upsertTask(reused)
+            expectEqual(try await store.tasks().first?.sessionIds, [])
+        }
     }
 }

@@ -173,6 +173,22 @@ public actor Store {
         }
     }
 
+    /// Writes a task back exactly as it was, links included. Unlike
+    /// `upsertTask`, which only ever adds links, this also drops the links the
+    /// row no longer carries — the way a session linked to the wrong task is
+    /// unlinked again.
+    public func restoreTask(_ task: TaskItem) throws {
+        try db.execute("DELETE FROM task_session_links WHERE task_id = ?", [.text(task.id)])
+        try upsertTask(task)
+    }
+
+    /// Removes a task row and its session links, for undoing a task an action
+    /// created. Distinct from archiving, which keeps the row on purpose.
+    public func deleteTask(_ id: String) throws {
+        try db.execute("DELETE FROM task_session_links WHERE task_id = ?", [.text(id)])
+        try db.execute("DELETE FROM tasks WHERE id = ?", [.text(id)])
+    }
+
     public func setRanks(_ rankedTaskIds: [String]) throws {
         for (index, taskId) in rankedTaskIds.enumerated() {
             try db.execute(

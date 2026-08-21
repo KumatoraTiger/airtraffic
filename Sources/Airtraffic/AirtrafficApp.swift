@@ -17,6 +17,13 @@ struct AirtrafficApp: App {
                     model.start()
                 }
         }
+        .commands {
+            // The board's own history, in the place macOS users look for it.
+            // Replacing the group rather than adding one keeps a single ⌘Z.
+            CommandGroup(replacing: .undoRedo) {
+                UndoRedoCommands(model: model)
+            }
+        }
 
         MenuBarExtra {
             MenuBarContent()
@@ -27,6 +34,26 @@ struct AirtrafficApp: App {
             // status item when the reads happen inside one.
             MenuBarLabel(model: model)
         }
+    }
+}
+
+/// 編集メニューの「元に戻す」/「やり直す」. A real View type, not inline command
+/// content: observation tracking only runs inside a `body`, so the items would
+/// otherwise keep the enabled state they had at launch.
+struct UndoRedoCommands: View {
+    let model: AppModel
+
+    var body: some View {
+        Button(model.undoLabel.map { "「\($0)」を元に戻す" } ?? "元に戻す") {
+            Task { await model.undoLastEdit() }
+        }
+        .keyboardShortcut("z", modifiers: .command)
+        .disabled(!model.canUndo)
+        Button(model.redoLabel.map { "「\($0)」をやり直す" } ?? "やり直す") {
+            Task { await model.redoLastEdit() }
+        }
+        .keyboardShortcut("z", modifiers: [.command, .shift])
+        .disabled(!model.canRedo)
     }
 }
 

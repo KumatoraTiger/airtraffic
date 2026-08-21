@@ -185,6 +185,15 @@ struct RootView: View {
                     laneToggle(lane)
                 }
                 Button {
+                    Task { await model.undoLastEdit() }
+                } label: {
+                    Label("元に戻す", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!model.canUndo)
+                .help(
+                    model.undoLabel.map { "「\($0)」を元に戻す (⌘Z)" }
+                        ?? "元に戻せる操作はありません")
+                Button {
                     windowPinned.toggle()
                 } label: {
                     Label("前面固定", systemImage: windowPinned ? "pin.fill" : "pin")

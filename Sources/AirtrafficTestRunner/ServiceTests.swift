@@ -843,6 +843,57 @@ struct ServiceTests {
             expectEqual(written.map(\.id), ["t-2"])
         }
 
+        await TestKit.shared.run("undo: a changed row is recorded as it was") {
+            let before = [task(id: "t-1", title: "認証を直す"), task(id: "t-2", title: "READMEを更新する")]
+            var after = before
+            after[0].status = .done
+            let step = UndoStep.between(before: before, after: after, label: "完了")
+            expectEqual(step.restore.map(\.id), ["t-1"])
+            expectEqual(step.restore.first?.status, .todo)
+            expect(step.removeIds.isEmpty, "nothing was created")
+        }
+
+        await TestKit.shared.run("undo: a created row is recorded for removal") {
+            let before = [task(id: "t-1", title: "認証を直す")]
+            let after = before + [task(id: "t-2", title: "トークン検証を書く", parentId: "t-1")]
+            let step = UndoStep.between(before: before, after: after, label: "サブタスクの追加")
+            expectEqual(step.removeIds, ["t-2"])
+            expect(step.restore.isEmpty, "no existing row changed")
+        }
+
+        await TestKit.shared.run("undo: an archived row counts as changed, not as gone") {
+            // tasks() hides archived rows, so archiving looks like a deletion;
+            // undoing it has to write the row back rather than drop it.
+            let before = [task(id: "t-1", title: "認証を直す")]
+            let step = UndoStep.between(before: before, after: [], label: "アーカイブ")
+            expectEqual(step.restore.map(\.id), ["t-1"])
+            expect(step.removeIds.isEmpty, "the row is restored, not removed")
+        }
+
+        await TestKit.shared.run("undo: an action that changed nothing records nothing") {
+            let tasks = [task(id: "t-1", title: "認証を直す")]
+            let step = UndoStep.between(before: tasks, after: tasks, label: "完了")
+            expect(step.isEmpty, "no rows and no preferences")
+        }
+
+        await TestKit.shared.run("undo: a recorded preference is taken back too") {
+            let tasks = [task(id: "t-1", title: "認証を直す")]
+            let step = UndoStep.between(
+                before: tasks, after: tasks, label: "並べ替え", addedPreferenceIds: ["p-1"])
+            expectEqual(step.removePreferenceIds, ["p-1"])
+            expect(!step.isEmpty, "a preference alone is worth undoing")
+        }
+
+        await TestKit.shared.run("undo: the step back and the step forward mirror each other") {
+            let before = [task(id: "t-1", title: "認証を直す"), task(id: "t-2", title: "READMEを更新する")]
+            var after = before
+            after[1].parentId = "t-1"
+            let undo = UndoStep.between(before: before, after: after, label: "サブタスク化")
+            let redo = UndoStep.between(before: after, after: before, label: "サブタスク化")
+            expectEqual(undo.restore.first?.parentId, nil)
+            expectEqual(redo.restore.first?.parentId, "t-1")
+        }
+
         await TestKit.shared.run("board: an orphaned subtask stays visible") {
             // The parent was archived, so tasks() no longer returns it.
             let tasks = [task(id: "t-2", title: "トークン検証を書く", parentId: "t-1")]
