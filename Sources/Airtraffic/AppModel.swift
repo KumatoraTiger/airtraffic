@@ -356,19 +356,12 @@ final class AppModel {
         await refreshLists()
     }
 
+    /// Completing a parent completes its open subtasks; see `TaskStatusChange`.
     func setTaskStatus(_ task: TaskItem, _ status: TaskStatus) async {
         guard let store else { return }
-        var updated = task
-        updated.status = status
-        updated.updatedAt = Date()
-        // The completion timestamp follows the done state: reopening clears
-        // it, so the daily report never counts a reopened task as finished.
-        if status == .done {
-            updated.completedAt = task.status == .done ? task.completedAt : Date()
-        } else {
-            updated.completedAt = nil
+        for updated in TaskStatusChange.apply(status, to: task, in: tasks) {
+            try? await store.upsertTask(updated)
         }
-        try? await store.upsertTask(updated)
         await refreshLists()
     }
 

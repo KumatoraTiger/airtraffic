@@ -798,6 +798,51 @@ struct ServiceTests {
             expect(entries[0].sessions.isEmpty, "the session belongs to the subtask, not the parent")
         }
 
+        await TestKit.shared.run("status: completing a parent completes its subtasks") {
+            let now = midDay
+            let done = TaskItem(
+                id: "t-3", title: "テストを足す", detail: "", status: .done, rank: nil,
+                source: .manual, createdAt: now, updatedAt: now,
+                completedAt: now.addingTimeInterval(-3600), parentId: "t-1", sessionIds: [])
+            let tasks = [
+                task(id: "t-1", title: "認証を直す"),
+                task(id: "t-2", title: "トークン検証を書く", parentId: "t-1"),
+                done,
+                task(id: "t-4", title: "壊れた検証を消す", status: .archived, parentId: "t-1"),
+                task(id: "t-5", title: "READMEを更新する"),
+            ]
+            let written = TaskStatusChange.apply(.done, to: tasks[0], in: tasks, now: now)
+            expectEqual(written.map(\.id), ["t-1", "t-2"])
+            expectEqual(written[0].completedAt, now)
+            expectEqual(written[1].status, .done)
+            expectEqual(written[1].completedAt, now)
+            // The subtask already finished keeps its own timestamp, and the
+            // archived one is not dragged back onto the board.
+            expect(!written.contains { $0.id == "t-3" || $0.id == "t-4" }, "no rewrite needed")
+        }
+
+        await TestKit.shared.run("status: reopening a parent leaves its subtasks done") {
+            let now = midDay
+            let tasks = [
+                task(id: "t-1", title: "認証を直す", status: .done),
+                task(id: "t-2", title: "トークン検証を書く", status: .done, parentId: "t-1"),
+            ]
+            let written = TaskStatusChange.apply(.todo, to: tasks[0], in: tasks, now: now)
+            expectEqual(written.map(\.id), ["t-1"])
+            expect(written[0].completedAt == nil, "reopening clears the completion date")
+        }
+
+        await TestKit.shared.run("status: completing a subtask touches nothing else") {
+            let now = midDay
+            let tasks = [
+                task(id: "t-1", title: "認証を直す"),
+                task(id: "t-2", title: "トークン検証を書く", parentId: "t-1"),
+                task(id: "t-3", title: "テストを足す", parentId: "t-1"),
+            ]
+            let written = TaskStatusChange.apply(.done, to: tasks[1], in: tasks, now: now)
+            expectEqual(written.map(\.id), ["t-2"])
+        }
+
         await TestKit.shared.run("board: an orphaned subtask stays visible") {
             // The parent was archived, so tasks() no longer returns it.
             let tasks = [task(id: "t-2", title: "トークン検証を書く", parentId: "t-1")]
