@@ -98,6 +98,33 @@ final class AppModel {
             }
         }
     }
+    /// GitHub inbox: assigned issues, the user's own pull requests and the
+    /// reviews they were asked for, imported as tasks.
+    var githubEnabled: Bool {
+        didSet { UserDefaults.standard.set(githubEnabled, forKey: Self.githubEnabledKey) }
+    }
+    /// Repositories the user opted OUT of. Everything else is imported, so a
+    /// repository they start working in appears without any setup.
+    var githubExcludedRepos: Set<String> {
+        didSet {
+            UserDefaults.standard.set(
+                Array(githubExcludedRepos).sorted(), forKey: Self.githubExcludedKey)
+        }
+    }
+    var githubCloseBehavior: GitHubCloseBehavior {
+        didSet {
+            UserDefaults.standard.set(githubCloseBehavior.rawValue, forKey: Self.githubCloseKey)
+        }
+    }
+    /// Every repository seen so far, so settings can list one to opt out of
+    /// even when it has nothing open right now.
+    private(set) var githubRepos: [String] {
+        didSet { UserDefaults.standard.set(githubRepos, forKey: Self.githubReposKey) }
+    }
+    /// What the last pass did, for the settings screen. Nil before the first
+    /// pass of the session.
+    private(set) var githubStatus: String?
+
     /// Chime preferences for the pomodoro, persisted across launches.
     var soundSettings: PomodoroSoundSettings {
         didSet {
@@ -134,9 +161,20 @@ final class AppModel {
     private let prioritizer = Prioritizer()
     private let reporter = DailyReporter()
     private let gitLog = GitLog()
+    private let githubInbox = GitHubInbox()
     private var scanTask: Task<Void, Never>?
     private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
+    private var lastGitHubPass = Date.distantPast
+    private var githubPassRunning = false
+
+    static let githubEnabledKey = "github.enabled"
+    static let githubExcludedKey = "github.excludedRepos"
+    static let githubCloseKey = "github.closeBehavior"
+    static let githubReposKey = "github.repos"
+    /// GitHub is polled far less often than the transcripts: it is a network
+    /// call, and an issue list does not change every three seconds.
+    private static let githubInterval: TimeInterval = 300
 
     init() {
         // The key was "extractionEnabled" while the toggle also covered the
@@ -154,6 +192,14 @@ final class AppModel {
                 ?? kind.defaultModel
         }
         self.models = models
+        githubEnabled = UserDefaults.standard.object(forKey: Self.githubEnabledKey) as? Bool ?? false
+        githubExcludedRepos = Set(
+            UserDefaults.standard.stringArray(forKey: Self.githubExcludedKey) ?? [])
+        githubCloseBehavior =
+            GitHubCloseBehavior(
+                rawValue: UserDefaults.standard.string(forKey: Self.githubCloseKey) ?? "")
+            ?? .complete
+        githubRepos = UserDefaults.standard.stringArray(forKey: Self.githubReposKey) ?? []
         soundSettings =
             UserDefaults.standard.data(forKey: "pomodoroSound")
             .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
@@ -190,6 +236,47 @@ final class AppModel {
             lastLabelPass = Date()
             await runLabelPass()
         }
+        if githubEnabled, Date().timeIntervalSince(lastGitHubPass) > Self.githubInterval {
+            await runGitHubPass()
+        }
+    }
+
+    // MARK: - GitHub
+
+    /// Reads GitHub once and writes what changed.
+    ///
+    /// Deliberately outside the undo history: these rows mirror GitHub, and
+    /// taking back an import would only mean the next pass writes it again.
+    /// The way to dismiss one is to archive it, which the sync respects.
+    func runGitHubPass() async {
+        guard let store, !githubPassRunning else { return }
+        githubPassRunning = true
+        defer { githubPassRunning = false }
+        lastGitHubPass = Date()
+
+        // Archived rows are what tells the sync "the user dismissed this one",
+        // so the pass has to see them.
+        let existing = (try? await store.tasks(includeArchived: true)) ?? []
+        let settings = GitHubSettings(
+            enabled: githubEnabled, excludedRepos: githubExcludedRepos,
+            closeBehavior: githubCloseBehavior)
+        let result = await githubInbox.sync(existing: existing, settings: settings)
+
+        guard result.available else {
+            githubStatus = "GitHub CLI (gh) を実行できませんでした。`gh auth login` を確認してください。"
+            return
+        }
+        for task in result.upserts {
+            try? await store.upsertTask(task)
+        }
+        if !result.repos.isEmpty {
+            githubRepos = Array(Set(githubRepos).union(result.repos)).sorted()
+        }
+        let stamp = Date().formatted(date: .omitted, time: .shortened)
+        githubStatus =
+            result.upserts.isEmpty
+            ? "\(stamp) 同期しました（更新なし）" : "\(stamp) \(result.upserts.count) 件を更新しました"
+        await refreshLists()
     }
 
     private func refreshFromStore() async {

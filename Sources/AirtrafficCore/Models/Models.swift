@@ -133,6 +133,9 @@ public enum TaskSource: String, Codable, Sendable {
     case llm
     /// Created by hand in the app.
     case manual
+    /// Imported from GitHub: an assigned issue, a pull request the user opened,
+    /// or one waiting for their review.
+    case github
 }
 
 public struct TaskItem: Identifiable, Hashable, Sendable {

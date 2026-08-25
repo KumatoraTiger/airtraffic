@@ -26,6 +26,7 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            GitHubSection()
             PomodoroSoundSection()
             Section("学習した優先順位の傾向") {
                 if model.preferences.isEmpty {
@@ -126,6 +127,52 @@ struct PomodoroSoundSection: View {
             .buttonStyle(.borderless)
             .disabled(selection.wrappedValue == .none)
             .help("音を試す")
+        }
+    }
+}
+
+/// GitHub inbox settings. Repositories are opted out, not in: the list below
+/// fills itself from what the sync sees, and unchecking one stops its import.
+struct GitHubSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Section("GitHub 連携") {
+            Toggle("担当 issue・自分の PR・レビュー依頼をタスクにする", isOn: $model.githubEnabled)
+            Text("GitHub CLI (gh) のログインを使います。アプリはトークンを保存しません。5分ごとに同期します。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("GitHub 側で close / merge されたら", selection: $model.githubCloseBehavior) {
+                ForEach(GitHubCloseBehavior.allCases) { behavior in
+                    Text(behavior.displayName).tag(behavior)
+                }
+            }
+            HStack {
+                Button("今すぐ同期") { Task { await model.runGitHubPass() } }
+                    .disabled(!model.githubEnabled)
+                if let status = model.githubStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if model.githubRepos.isEmpty {
+                Text("同期するとリポジトリがここに並びます。外したいものだけオフにしてください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(model.githubRepos, id: \.self) { repo in
+                Toggle(
+                    repo,
+                    isOn: Binding(
+                        get: { !model.githubExcludedRepos.contains(repo) },
+                        set: { included in
+                            if included {
+                                model.githubExcludedRepos.remove(repo)
+                            } else {
+                                model.githubExcludedRepos.insert(repo)
+                            }
+                        }))
+            }
         }
     }
 }

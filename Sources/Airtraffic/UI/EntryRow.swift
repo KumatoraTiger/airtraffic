@@ -1,4 +1,5 @@
 import AirtrafficCore
+import AppKit
 import SwiftUI
 
 /// One unit of work on the board, task-first. A persistent task leads with
@@ -354,19 +355,43 @@ struct EntryRow: View {
         .help("ポモドーロ\(timer.phase.displayName)中")
     }
 
+    @ViewBuilder
     private func sourceBadge(_ task: TaskItem) -> some View {
         let (label, color): (String, Color) =
             switch task.source {
             case .deterministic: ("todo", .blue)
             case .llm: ("AI", .purple)
             case .manual: ("手動", .gray)
+            case .github: ("GitHub", .green)
             }
-        return Text(label)
+        let capsule =
+            Text(label)
             .font(.caption2)
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(color.opacity(0.15), in: Capsule())
             .foregroundStyle(color)
+        // A GitHub row exists to be opened, so its badge is the link.
+        if task.source == .github, let url = githubURL(task) {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                capsule
+            }
+            .buttonStyle(.plain)
+            .help("GitHub で開く")
+        } else {
+            capsule
+        }
+    }
+
+    /// The issue or pull request link the sync wrote into the detail line.
+    private func githubURL(_ task: TaskItem) -> URL? {
+        task.detail
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.hasPrefix("https://") }
+            .flatMap(URL.init(string:))
     }
 
     /// One line for what the most urgent execution is on right now: its
