@@ -246,6 +246,30 @@ final class AdapterTests {
             expectEqual(sessions.first?.id, "grok:g-3")
         }
 
+        await TestKit.shared.run("grok: a summary untouched since the lookback is skipped") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(id: "g-old", updatedSecondsAgo: 60, summary: "Ancient work")
+            try writeGrokActive(sessionId: "g-old")
+            let summary = tempDir.appendingPathComponent(
+                "sessions/%2FUsers%2Falex/g-old/summary.json")
+            try FileManager.default.setAttributes(
+                [.modificationDate: now.addingTimeInterval(-72 * 3600)], ofItemAtPath: summary.path)
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            expect(try adapter.scan(now: now).isEmpty, "stale file should not be read at all")
+        }
+
+        await TestKit.shared.run("grok: a rewritten summary is read again") { [self] in
+            try setUp()
+            defer { tearDown() }
+            try makeGrokSession(id: "g-5", updatedSecondsAgo: 300, summary: "First title")
+            try writeGrokActive(sessionId: "g-5")
+            let adapter = GrokAdapter(home: tempDir, config: .default, isProcessAlive: { _ in true })
+            expectEqual(try adapter.scan(now: now).first?.title, "First title")
+            try makeGrokSession(id: "g-5", updatedSecondsAgo: 60, summary: "Second title")
+            expectEqual(try adapter.scan(now: now).first?.title, "Second title")
+        }
+
         await TestKit.shared.run("grok: empty summary falls back, not to (無題)") { [self] in
             try setUp()
             defer { tearDown() }

@@ -231,7 +231,10 @@ final class AppModel {
     // MARK: - Scan loop
 
     private func scanOnce() async {
-        sessions = await coordinator.scan()
+        // Assigning an identical array still tells SwiftUI the board changed,
+        // and the loop runs every three seconds, so compare before writing.
+        let scanned = await coordinator.scan()
+        if scanned != sessions { sessions = scanned }
         if labelingEnabled, Date().timeIntervalSince(lastLabelPass) > 60 {
             lastLabelPass = Date()
             await runLabelPass()

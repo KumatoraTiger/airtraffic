@@ -14,6 +14,10 @@ public final class GrokAdapter: AgentAdapter {
 
     private final class State {
         var offset: UInt64 = 0
+        /// The parsed `summary.json` and the timestamp it was read at, so an
+        /// untouched session costs one `stat` instead of a read and a parse.
+        var summary: [String: Any]?
+        var summaryModified: Date?
         var firstUserText = ""
         var lastUserText = ""
         var lastAssistantText = ""
@@ -72,10 +76,28 @@ public final class GrokAdapter: AgentAdapter {
     }
 
     private func scanSession(_ dir: URL, liveSessionIds: Set<String>, now: Date) throws -> SessionSnapshot? {
-        let summaryURL = dir.appendingPathComponent("summary.json")
-        guard let data = try? Data(contentsOf: summaryURL),
-            let summary = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let summaryURL = dir.appendingPathComponent("summary.json", isDirectory: false)
+        // Reading every summary is what the scan spends its time on, and the
+        // directory keeps every session the CLI ever wrote. The file's own
+        // timestamp answers the lookback question, so ask that first and read
+        // only the sessions that can still reach the board.
+        guard
+            let modified = try? summaryURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate,
+            now.timeIntervalSince(modified) < config.lookback
         else { return nil }
+
+        let state = states[dir.path] ?? State()
+        states[dir.path] = state
+        if state.summaryModified != modified {
+            guard let data = try? Data(contentsOf: summaryURL),
+                let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { return nil }
+            state.summary = parsed
+            state.summaryModified = modified
+        }
+        guard let summary = state.summary else { return nil }
 
         // Grok writes subagent transcripts next to real sessions; they are
         // internal machinery, not work the user drives.
@@ -91,8 +113,7 @@ public final class GrokAdapter: AgentAdapter {
             now.timeIntervalSince(lastActivity) < config.lookback
         else { return nil }
 
-        let state = states[dir.path] ?? State()
-        let historyURL = dir.appendingPathComponent("chat_history.jsonl")
+        let historyURL = dir.appendingPathComponent("chat_history.jsonl", isDirectory: false)
         if let (lines, newOffset) = try? FileTail.readNewLines(url: historyURL, from: state.offset) {
             state.offset = newOffset
             for line in lines {
@@ -100,7 +121,6 @@ public final class GrokAdapter: AgentAdapter {
                 ingest(object, into: state)
             }
         }
-        states[dir.path] = state
 
         let isLive = liveSessionIds.contains(sessionId)
         let status: SessionStatus
