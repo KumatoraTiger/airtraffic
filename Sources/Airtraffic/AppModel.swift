@@ -17,10 +17,16 @@ struct ChatEntry: Identifiable, Hashable {
 final class AppModel {
     // MARK: - State
 
-    var sessions: [SessionSnapshot] = []
-    var tasks: [TaskItem] = []
+    var sessions: [SessionSnapshot] = [] {
+        didSet { rebuildBoard() }
+    }
+    var tasks: [TaskItem] = [] {
+        didSet { rebuildBoard() }
+    }
     /// LLM-generated work labels ("レビュー: …") by session id.
-    var labels: [String: WorkLabel] = [:]
+    var labels: [String: WorkLabel] = [:] {
+        didSet { rebuildBoard() }
+    }
     var preferences: [PreferenceNote] = []
     var chatEntries: [ChatEntry] = []
     var chatBusy = false
@@ -144,13 +150,31 @@ final class AppModel {
             return entry.isRecent()
         }
     }
-    var waitingCount: Int { waitingEntries.count }
+    /// Kept as state rather than recomputed: the badge and the menu bar read
+    /// it on every redraw, and it walks every row.
+    private(set) var waitingCount: Int = 0
 
     /// Unified board rows: tasks with their executions attached, plus session
     /// activity that matches no task, materialized as its own rows. Done tasks
     /// are included (with their linked sessions); the view puts them in 完了.
-    var boardEntries: [BoardEntry] {
-        BoardAssembler.assemble(tasks: tasks, sessions: sessions, labels: labels)
+    ///
+    /// Assembled once per change to `tasks` / `sessions` / `labels`, never in a
+    /// view body: matching is quadratic in tasks × sessions, and the board
+    /// reads these rows a dozen times per redraw.
+    private(set) var boardEntries: [BoardEntry] = []
+
+    /// Rebuilds the board rows. Called from the `didSet` of everything they
+    /// are built from, so no caller has to remember to.
+    private func rebuildBoard() {
+        boardEntries = BoardAssembler.assemble(tasks: tasks, sessions: sessions, labels: labels)
+        refreshWaitingCount()
+    }
+
+    /// Cheap pass over the assembled rows. Also runs on the scan loop, because
+    /// a row can stop being "recent" with nothing else having changed.
+    private func refreshWaitingCount() {
+        let count = waitingEntries.count
+        if count != waitingCount { waitingCount = count }
     }
 
     // MARK: - Internals
@@ -234,7 +258,7 @@ final class AppModel {
         // Assigning an identical array still tells SwiftUI the board changed,
         // and the loop runs every three seconds, so compare before writing.
         let scanned = await coordinator.scan()
-        if scanned != sessions { sessions = scanned }
+        if scanned != sessions { sessions = scanned } else { refreshWaitingCount() }
         if labelingEnabled, Date().timeIntervalSince(lastLabelPass) > 60 {
             lastLabelPass = Date()
             await runLabelPass()

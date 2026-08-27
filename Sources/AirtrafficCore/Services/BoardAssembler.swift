@@ -90,11 +90,19 @@ public enum BoardAssembler {
         // A subtask whose parent is gone (archived, deleted) would otherwise
         // vanish from the board, so it is treated as a top-level task.
         let known = Set(tasks.map(\.id))
+        // Every session is matched against every task, so the titles are
+        // normalized once here instead of once per pair.
+        var keyed: [String: TitleKeys] = [:]
+        for session in sessions { keyed[session.id] = titleKeys(session, labels: labels) }
 
         for task in tasks {
             var attached: [SessionSnapshot] = []
+            let taskKey = TitleMatcher.fingerprint(task.title)
             remaining.removeAll { session in
-                guard attaches(session, to: task, labels: labels)
+                guard
+                    attaches(
+                        session, keys: keyed[session.id] ?? titleKeys(session, labels: labels),
+                        to: task, taskKey: taskKey, matchDoneByTitle: false)
                 else { return false }
                 attached.append(session)
                 return true
@@ -158,12 +166,41 @@ public enum BoardAssembler {
         _ session: SessionSnapshot, to task: TaskItem, labels: [String: WorkLabel] = [:],
         matchDoneByTitle: Bool = false
     ) -> Bool {
+        attaches(
+            session, keys: titleKeys(session, labels: labels), to: task,
+            taskKey: TitleMatcher.fingerprint(task.title), matchDoneByTitle: matchDoneByTitle)
+    }
+
+    /// The titles a session can be matched by, prepared once. Preparing them
+    /// is the expensive part of a comparison, and every session is compared
+    /// against every task.
+    struct TitleKeys {
+        var title: TitleMatcher.Fingerprint
+        /// Set only when the session carries a real (non-placeholder) label.
+        var subject: TitleMatcher.Fingerprint?
+        var display: TitleMatcher.Fingerprint?
+    }
+
+    static func titleKeys(_ session: SessionSnapshot, labels: [String: WorkLabel]) -> TitleKeys {
+        guard let label = labels[session.id], !label.isPlaceholder else {
+            return TitleKeys(title: TitleMatcher.fingerprint(session.title))
+        }
+        return TitleKeys(
+            title: TitleMatcher.fingerprint(session.title),
+            subject: TitleMatcher.fingerprint(label.subject),
+            display: TitleMatcher.fingerprint(label.displayTitle))
+    }
+
+    private static func attaches(
+        _ session: SessionSnapshot, keys: TitleKeys, to task: TaskItem,
+        taskKey: TitleMatcher.Fingerprint, matchDoneByTitle: Bool
+    ) -> Bool {
         if task.sessionIds.contains(session.id) { return true }
         if task.status == .done && !matchDoneByTitle { return false }
-        if TitleMatcher.isSimilar(session.title, task.title) { return true }
-        guard let label = labels[session.id], !label.isPlaceholder else { return false }
-        return TitleMatcher.isSimilar(label.subject, task.title)
-            || TitleMatcher.isSimilar(label.displayTitle, task.title)
+        if TitleMatcher.isSimilar(keys.title, taskKey) { return true }
+        guard let subject = keys.subject, let display = keys.display else { return false }
+        return TitleMatcher.isSimilar(subject, taskKey)
+            || TitleMatcher.isSimilar(display, taskKey)
     }
 
     /// Sessions doing the same labeled work are one unit wherever they run —

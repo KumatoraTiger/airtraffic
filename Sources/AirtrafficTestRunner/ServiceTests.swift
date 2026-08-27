@@ -284,6 +284,19 @@ struct ServiceTests {
                 "unrelated titles should stay distinct")
         }
 
+        await TestKit.shared.run("matcher: containment and length still decide the same way") {
+            expect(
+                TitleMatcher.isSimilar("認証まわりのリファクタ", "認証まわりのリファクタを進める"),
+                "a title contained in a longer one is the same work once it is long enough")
+            expect(
+                !TitleMatcher.isSimilar("直す", "認証まわりのリファクタを進める"),
+                "a short generic title should not be swallowed by a long one")
+            expect(
+                TitleMatcher.isSimilar(
+                    TitleMatcher.fingerprint("CIを直す"), TitleMatcher.fingerprint("ＣＩ を直す")),
+                "prepared titles must compare exactly like raw ones")
+        }
+
         await TestKit.shared.run("prioritizer: parses ranking block and display text") {
             let prioritizer = Prioritizer()
             let reply = """
