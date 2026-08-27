@@ -52,13 +52,23 @@ public enum GitHubTaskSync {
     /// so the board says what the row asks of them before its subject.
     public static let reviewPrefix = "レビュー: "
 
-    /// The title of a GitHub task: the item's own title, prefixed when the
-    /// item is a review request. A title that already carries the prefix is
-    /// left alone, so a re-scan never stacks it twice.
+    /// The `#123 ` marker put in front of every GitHub title, so the board
+    /// says which issue or pull request the row stands for.
+    public static func numberPrefix(for item: GitHubItem) -> String { "#\(item.number) " }
+
+    /// The title of a GitHub task: the item's number, then the item's own
+    /// title, with 「レビュー: 」 in front when the item is a review request.
+    ///
+    /// The prefixes are stripped off the incoming title before being put back,
+    /// so a re-scan never stacks them and an upstream title that already reads
+    /// 「レビュー: …」 is not doubled.
     public static func title(for item: GitHubItem) -> String {
-        guard item.relation == .reviewRequested else { return item.title }
-        guard !item.title.hasPrefix(reviewPrefix) else { return item.title }
-        return reviewPrefix + item.title
+        let number = numberPrefix(for: item)
+        var body = Substring(item.title)
+        if body.hasPrefix(reviewPrefix) { body = body.dropFirst(reviewPrefix.count) }
+        if body.hasPrefix(number) { body = body.dropFirst(number.count) }
+        let titled = number + body
+        return item.relation == .reviewRequested ? reviewPrefix + titled : titled
     }
 
     /// The detail line of a GitHub task: what the item is, then its link.
