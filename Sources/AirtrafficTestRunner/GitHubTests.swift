@@ -80,6 +80,36 @@ struct GitHubTests {
             expectEqual(rows[0].id, "gh:alex/other#3")
         }
 
+        await kit.run("a review request is prefixed on the board") {
+            let review = item(number: 7, relation: .reviewRequested, isPullRequest: true)
+            let rows = GitHubTaskSync.upserts(
+                open: [review], existing: [], settings: GitHubSettings(enabled: true))
+            expectEqual(rows.count, 1)
+            expectEqual(rows[0].title, "レビュー: バグを直す")
+        }
+
+        await kit.run("the user's own work keeps its title") {
+            let mine = item(number: 8, relation: .authored, isPullRequest: true)
+            let rows = GitHubTaskSync.upserts(
+                open: [mine], existing: [], settings: GitHubSettings(enabled: true))
+            expectEqual(rows[0].title, "バグを直す")
+        }
+
+        await kit.run("a re-scan never stacks the review prefix twice") {
+            let review = item(number: 7, relation: .reviewRequested, isPullRequest: true)
+            let first = GitHubTaskSync.upserts(
+                open: [review], existing: [], settings: GitHubSettings(enabled: true))
+            let second = GitHubTaskSync.upserts(
+                open: [review], existing: first, settings: GitHubSettings(enabled: true))
+            expectEqual(second.count, 0)
+            let titled = item(
+                number: 7, title: "レビュー: バグを直す", relation: .reviewRequested,
+                isPullRequest: true)
+            let third = GitHubTaskSync.upserts(
+                open: [titled], existing: first, settings: GitHubSettings(enabled: true))
+            expectEqual(third.count, 0)
+        }
+
         await kit.run("a review request outranks the user's own pull request") {
             let mine = item(number: 7, relation: .authored, isPullRequest: true)
             let review = item(number: 7, relation: .reviewRequested, isPullRequest: true)

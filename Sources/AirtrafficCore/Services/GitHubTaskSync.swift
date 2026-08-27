@@ -48,6 +48,19 @@ public enum GitHubTaskSync {
     /// back, so a task reopened upstream loses the note again.
     public static let closedMarker = "GitHub 上は完了"
 
+    /// Prefixed on the title of a pull request waiting for the user's review,
+    /// so the board says what the row asks of them before its subject.
+    public static let reviewPrefix = "レビュー: "
+
+    /// The title of a GitHub task: the item's own title, prefixed when the
+    /// item is a review request. A title that already carries the prefix is
+    /// left alone, so a re-scan never stacks it twice.
+    public static func title(for item: GitHubItem) -> String {
+        guard item.relation == .reviewRequested else { return item.title }
+        guard !item.title.hasPrefix(reviewPrefix) else { return item.title }
+        return reviewPrefix + item.title
+    }
+
     /// The detail line of a GitHub task: what the item is, then its link.
     public static func detail(for item: GitHubItem) -> String {
         let kind = item.isDraft ? "\(item.relation.displayName)（下書き）" : item.relation.displayName
@@ -81,18 +94,19 @@ public enum GitHubTaskSync {
         for item in deduplicate(items) {
             guard !settings.excludedRepos.contains(item.repo) else { continue }
             let detail = detail(for: item)
+            let title = title(for: item)
             guard let held = byId[item.taskId] else {
                 result.append(
                     TaskItem(
-                        id: item.taskId, title: item.title, detail: detail, status: .todo,
+                        id: item.taskId, title: title, detail: detail, status: .todo,
                         rank: nil, source: .github, createdAt: now, updatedAt: now,
                         sessionIds: []))
                 continue
             }
             guard held.status != .archived else { continue }
-            guard held.title != item.title || held.detail != detail else { continue }
+            guard held.title != title || held.detail != detail else { continue }
             var updated = held
-            updated.title = item.title
+            updated.title = title
             updated.detail = detail
             updated.updatedAt = now
             result.append(updated)
