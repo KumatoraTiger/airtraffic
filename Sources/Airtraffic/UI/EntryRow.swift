@@ -95,6 +95,7 @@ struct EntryRow: View {
                         todayToggle(task)
                     }
                     sourceBadge(task)
+                    automationBadge(task)
                 } else {
                     Button("タスクにする") {
                         Task { await model.keepEntry(entry) }
@@ -383,6 +384,71 @@ struct EntryRow: View {
         } else {
             capsule
         }
+    }
+
+    /// What the per-task command produced, when it produced anything.
+    ///
+    /// Reveals the output directory in the Finder rather than opening one
+    /// file: a command is free to write several (a short version and a long
+    /// one, say), and choosing among them for the user was guesswork. The
+    /// newest page is selected, so the one to read is under the cursor.
+    @ViewBuilder
+    private func automationBadge(_ task: TaskItem) -> some View {
+        switch task.automationState {
+        case .running:
+            ProgressView()
+                .controlSize(.mini)
+                .help("解説を生成中")
+        case .done:
+            if let path = task.artifactPath {
+                Button {
+                    reveal(path)
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+                .buttonStyle(.plain)
+                .help("生成物のフォルダを開く")
+            }
+        case .failed:
+            Image(systemName: "exclamationmark.triangle")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .help("解説の生成に失敗しました")
+        case nil:
+            EmptyView()
+        }
+    }
+
+    /// Opens the Finder on what the command wrote, with the newest page
+    /// selected. A path left by an earlier build names one file, which the
+    /// same call reveals just as well.
+    private func reveal(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return }
+        guard isDirectory.boolValue else {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            return
+        }
+        let contents =
+            (try? FileManager.default.contentsOfDirectory(
+                at: url, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let pages = contents.filter { $0.pathExtension.lowercased() == "html" }
+        let newest = (pages.isEmpty ? contents : pages).max { left, right in
+            modified(left) < modified(right)
+        }
+        if let newest {
+            NSWorkspace.shared.activateFileViewerSelecting([newest])
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func modified(_ url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+            ?? .distantPast
     }
 
     /// The issue or pull request link the sync wrote into the detail line.

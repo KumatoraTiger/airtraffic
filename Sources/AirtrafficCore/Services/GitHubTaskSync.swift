@@ -77,6 +77,29 @@ public enum GitHubTaskSync {
         return "\(kind) · \(item.repo)#\(item.number)\n\(item.url)"
     }
 
+    /// The relation a stored task was built from, read back out of its
+    /// detail line.
+    ///
+    /// The detail line is machine-owned (`detail(for:)` writes it and nothing
+    /// else edits it), which is what makes reading it back safe. A row from an
+    /// older build, or one whose line was hand-edited, answers nil.
+    public static func relation(fromDetail detail: String) -> GitHubRelation? {
+        guard let head = detail.split(separator: "\n").first,
+            let kind = head.split(separator: "·").first
+        else { return nil }
+        let name = kind.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "（下書き）", with: "")
+        return GitHubRelation.allCases.first { $0.displayName == name }
+    }
+
+    /// The link a stored task was built from, read back out of its detail
+    /// line. Nil when no line of it parses as a URL.
+    public static func url(fromDetail detail: String) -> String? {
+        detail.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { URL(string: $0)?.scheme != nil }
+    }
+
     /// One item per task id, keeping the most pressing reason it matched.
     public static func deduplicate(_ items: [GitHubItem]) -> [GitHubItem] {
         var best: [String: GitHubItem] = [:]

@@ -47,6 +47,7 @@ public actor Store {
         try Self.migrateTaskIsToday(db)
         try Self.migrateTaskCompletedAt(db)
         try Self.migrateTaskParentId(db)
+        try Self.migrateTaskAutomation(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -97,6 +98,18 @@ public actor Store {
         try db.execute("ALTER TABLE tasks ADD COLUMN parent_id TEXT")
     }
 
+    /// Adds the automation columns behind the per-task command. Existing
+    /// tasks have no state, which is exactly "never ran".
+    private static func migrateTaskAutomation(_ db: SQLiteDatabase) throws {
+        let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
+        if !columns.contains("automation_state") {
+            try db.execute("ALTER TABLE tasks ADD COLUMN automation_state TEXT")
+        }
+        if !columns.contains("artifact_path") {
+            try db.execute("ALTER TABLE tasks ADD COLUMN artifact_path TEXT")
+        }
+    }
+
     // MARK: - Cursors
 
     /// Byte offset up to which a transcript file has been parsed.
@@ -140,7 +153,10 @@ public actor Store {
                 updatedAt: Date(timeIntervalSince1970: row.real("updated_at")),
                 completedAt: row.realOrNil("completed_at").map(Date.init(timeIntervalSince1970:)),
                 parentId: row.textOrNil("parent_id"),
-                sessionIds: sessionsByTask[row.text("id")] ?? []
+                sessionIds: sessionsByTask[row.text("id")] ?? [],
+                automationState: row.textOrNil("automation_state")
+                    .flatMap(AutomationState.init(rawValue:)),
+                artifactPath: row.textOrNil("artifact_path")
             )
         }
     }
@@ -173,6 +189,21 @@ public actor Store {
         }
     }
 
+    /// Records what the per-task command did. Deliberately separate from
+    /// `upsertTask`: the GitHub pass rewrites a row's title and link on every
+    /// scan, and it must not carry a stale automation state back with it.
+    public func setAutomation(
+        taskId: String, state: AutomationState?, artifactPath: String? = nil
+    ) throws {
+        try db.execute(
+            "UPDATE tasks SET automation_state = ?, artifact_path = ? WHERE id = ?",
+            [
+                state.map { .text($0.rawValue) } ?? .null,
+                artifactPath.map { .text($0) } ?? .null,
+                .text(taskId),
+            ])
+    }
+
     /// Writes a task back exactly as it was, links included. Unlike
     /// `upsertTask`, which only ever adds links, this also drops the links the
     /// row no longer carries — the way a session linked to the wrong task is
@@ -180,6 +211,8 @@ public actor Store {
     public func restoreTask(_ task: TaskItem) throws {
         try db.execute("DELETE FROM task_session_links WHERE task_id = ?", [.text(task.id)])
         try upsertTask(task)
+        try setAutomation(
+            taskId: task.id, state: task.automationState, artifactPath: task.artifactPath)
     }
 
     /// Removes a task row and its session links, for undoing a task an action

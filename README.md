@@ -61,6 +61,39 @@ make test   # run the test suite
 Then open 設定 (Settings) in the app, pick an LLM provider, paste an API key,
 and optionally enable LLM work labels (off by default).
 
+## Running a command when a task arrives
+
+The GitHub inbox can run a command of your own for every row it imports, once
+per row. Which kinds of row fire it is up to you: review requests, your own
+pull requests, assigned issues, or any combination. Review requests are the
+default, since that is the row whose subject you have not read yet.
+
+Airtraffic ships no command and knows nothing about any particular tool: you
+write the command line, it substitutes `{url}`, `{repo}`, `{repoName}`, `{number}`, `{title}`,
+`{taskId}` and `{outDir}`, and once the command writes anything into
+`{outDir}` the task row grows a button that reveals that directory in the
+Finder, newest page selected. Write as many files as you like: the app never
+picks one for you.
+
+The working directory takes the same placeholders, so `~/src/{repoName}` runs
+the command inside the checkout of the repository the row came from.
+
+The setting is off by default and does nothing until you also tick the
+repositories it may run for.
+
+Two things to know before turning it on:
+
+- **The command line is never handed to a shell.** Arguments are split with
+  shell-like quoting and passed straight to the process, so a pull request
+  title containing shell metacharacters is one ordinary argument. The cost is
+  that pipes, `&&` and redirection do not work — wrap those in a script of
+  your own if you need them.
+- **The command may read text somebody else wrote.** A pull request body or
+  diff can contain instructions aimed at whatever agent you point at it, and that
+  agent runs on your machine with your credentials, unattended. Run it with
+  the narrowest permissions your tool offers (read-only tools, no network,
+  a sandbox), and opt in only for repositories whose contributors you trust.
+
 ## Development
 
 This repo is set up for agent-driven development: `CLAUDE.md` / `AGENTS.md`

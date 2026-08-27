@@ -131,6 +131,45 @@ final class AppModel {
     /// pass of the session.
     private(set) var githubStatus: String?
 
+    /// Per-task command: runs once for a newly imported GitHub row, in the
+    /// repositories the user named. Off until they write a command.
+    var automationEnabled: Bool {
+        didSet { UserDefaults.standard.set(automationEnabled, forKey: Self.automationEnabledKey) }
+    }
+    /// Which kinds of GitHub row fire the command. Review requests by
+    /// default: that is the row whose subject the user has not read yet.
+    var automationRelations: Set<GitHubRelation> {
+        didSet {
+            UserDefaults.standard.set(
+                automationRelations.map(\.rawValue).sorted(), forKey: Self.automationRelationsKey)
+        }
+    }
+    var automationCommand: String {
+        didSet { UserDefaults.standard.set(automationCommand, forKey: Self.automationCommandKey) }
+    }
+    var automationWorkingDirectory: String {
+        didSet {
+            UserDefaults.standard.set(automationWorkingDirectory, forKey: Self.automationCwdKey)
+        }
+    }
+    /// Repositories the user opted IN to. Empty means the command never runs:
+    /// it acts on a pull request somebody else wrote, so it waits to be told
+    /// where that is acceptable.
+    var automationRepos: Set<String> {
+        didSet {
+            UserDefaults.standard.set(Array(automationRepos).sorted(), forKey: Self.automationReposKey)
+        }
+    }
+    /// What the last command did, for the settings screen.
+    private(set) var automationStatus: String?
+
+    var automationSettings: AutomationSettings {
+        AutomationSettings(
+            enabled: automationEnabled, relations: automationRelations,
+            commandLine: automationCommand, workingDirectory: automationWorkingDirectory,
+            allowedRepos: automationRepos)
+    }
+
     /// Chime preferences for the pomodoro, persisted across launches.
     var soundSettings: PomodoroSoundSettings {
         didSet {
@@ -186,16 +225,23 @@ final class AppModel {
     private let reporter = DailyReporter()
     private let gitLog = GitLog()
     private let githubInbox = GitHubInbox()
+    private let automationRunner = AutomationRunner(base: AutomationRunner.defaultBase())
     private var scanTask: Task<Void, Never>?
     private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
     private var lastGitHubPass = Date.distantPast
     private var githubPassRunning = false
+    private var automationRunning = false
 
     static let githubEnabledKey = "github.enabled"
     static let githubExcludedKey = "github.excludedRepos"
     static let githubCloseKey = "github.closeBehavior"
     static let githubReposKey = "github.repos"
+    static let automationEnabledKey = "automation.enabled"
+    static let automationRelationsKey = "automation.relations"
+    static let automationCommandKey = "automation.command"
+    static let automationCwdKey = "automation.workingDirectory"
+    static let automationReposKey = "automation.repos"
     /// GitHub is polled far less often than the transcripts: it is a network
     /// call, and an issue list does not change every three seconds.
     private static let githubInterval: TimeInterval = 300
@@ -224,6 +270,17 @@ final class AppModel {
                 rawValue: UserDefaults.standard.string(forKey: Self.githubCloseKey) ?? "")
             ?? .complete
         githubRepos = UserDefaults.standard.stringArray(forKey: Self.githubReposKey) ?? []
+        automationEnabled =
+            UserDefaults.standard.object(forKey: Self.automationEnabledKey) as? Bool ?? false
+        automationRelations = Set(
+            (UserDefaults.standard.stringArray(forKey: Self.automationRelationsKey)
+                ?? [GitHubRelation.reviewRequested.rawValue])
+                .compactMap(GitHubRelation.init(rawValue:)))
+        automationCommand = UserDefaults.standard.string(forKey: Self.automationCommandKey) ?? ""
+        automationWorkingDirectory =
+            UserDefaults.standard.string(forKey: Self.automationCwdKey) ?? ""
+        automationRepos = Set(
+            UserDefaults.standard.stringArray(forKey: Self.automationReposKey) ?? [])
         soundSettings =
             UserDefaults.standard.data(forKey: "pomodoroSound")
             .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
@@ -303,6 +360,51 @@ final class AppModel {
         githubStatus =
             result.upserts.isEmpty
             ? "\(stamp) 同期しました（更新なし）" : "\(stamp) \(result.upserts.count) 件を更新しました"
+        await refreshLists()
+        await runAutomationPass()
+    }
+
+    // MARK: - Per-task command
+
+    /// Runs the user's command once for each newly imported row it applies to.
+    ///
+    /// Sequential on purpose, and the state is written before the command
+    /// starts: a crash mid-run leaves the row marked `running` rather than
+    /// eligible again, so nothing is started twice.
+    func runAutomationPass() async {
+        guard let store, !automationRunning else { return }
+        let settings = automationSettings
+        guard settings.enabled else { return }
+        let existing = (try? await store.tasks(includeArchived: true)) ?? []
+        let planned = TaskAutomation.plan(tasks: existing, settings: settings)
+        guard !planned.isEmpty else { return }
+
+        automationRunning = true
+        defer { automationRunning = false }
+        for task in planned {
+            try? await store.setAutomation(taskId: task.id, state: .running)
+            await refreshLists()
+            let outcome = await automationRunner.run(task: task, settings: settings)
+            let stamp = Date().formatted(date: .omitted, time: .shortened)
+            switch outcome {
+            case .produced(let path):
+                try? await store.setAutomation(
+                    taskId: task.id, state: .done, artifactPath: path)
+                automationStatus = "\(stamp) \(task.title) の生成物ができました"
+            case .failed(let reason):
+                try? await store.setAutomation(taskId: task.id, state: .failed)
+                automationStatus = "\(stamp) \(task.title): \(reason)"
+            }
+            await refreshLists()
+        }
+    }
+
+    /// Clears one row's result so the command can run again, for the case
+    /// where it failed for a reason the user has since fixed.
+    func resetAutomation(_ task: TaskItem) async {
+        guard let store else { return }
+        await automationRunner.discard(taskId: task.id)
+        try? await store.setAutomation(taskId: task.id, state: nil)
         await refreshLists()
     }
 

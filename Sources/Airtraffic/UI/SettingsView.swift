@@ -27,6 +27,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             }
             GitHubSection()
+            AutomationSection()
             PomodoroSoundSection()
             Section("学習した優先順位の傾向") {
                 if model.preferences.isEmpty {
@@ -173,6 +174,86 @@ struct GitHubSection: View {
                             }
                         }))
             }
+        }
+    }
+}
+
+/// The per-task command. Deliberately blank until the user writes one: this
+/// runs a program of their choosing against work somebody else wrote, so the
+/// app ships no default and names no tool.
+struct AutomationSection: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Section("タスクが増えたときのコマンド") {
+            Toggle("下で選んだ種類のタスクが増えたらコマンドを実行する", isOn: $model.automationEnabled)
+            Text("実行するタスクの種類")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(GitHubRelation.allCases, id: \.self) { relation in
+                Toggle(
+                    relation.displayName,
+                    isOn: Binding(
+                        get: { model.automationRelations.contains(relation) },
+                        set: { fires in
+                            if fires {
+                                model.automationRelations.insert(relation)
+                            } else {
+                                model.automationRelations.remove(relation)
+                            }
+                        }))
+            }
+            TextField("コマンド", text: $model.automationCommand)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+            Text(
+                "実行ファイルと引数を空白区切りで書きます。シェルは通さないので、パイプや && は使えません。"
+                    + "使える置換は {url} {repo} {repoName} {number} {title} {taskId} {outDir} の7つで、"
+                    + "生成物は {outDir} に書かせてください。何かが書かれると、タスクの行からそのフォルダを開けるようになります。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            TextField("作業ディレクトリ（空ならホーム）", text: $model.automationWorkingDirectory)
+                .textFieldStyle(.roundedBorder)
+            Text(
+                "ここでも同じ置換が使えます。リポジトリごとのチェックアウトで動かしたいときは "
+                    + "~/src/{repoName} のように書いてください。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let status = model.automationStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+            if model.githubRepos.isEmpty {
+                Text("同期するとリポジトリがここに並びます。実行を許すものだけオンにしてください。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("実行を許可するリポジトリ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(model.githubRepos, id: \.self) { repo in
+                Toggle(
+                    repo,
+                    isOn: Binding(
+                        get: { model.automationRepos.contains(repo) },
+                        set: { allowed in
+                            if allowed {
+                                model.automationRepos.insert(repo)
+                            } else {
+                                model.automationRepos.remove(repo)
+                            }
+                        }))
+            }
+            Text(
+                "実行されるコマンドは、他人が書いた PR の本文や差分を読みます。"
+                    + "読み込んだ内容に指示が仕込まれていても実行されないよう、"
+                    + "権限を絞ったサンドボックスやネットワークを遮断した設定で起動してください。"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
     }
 }

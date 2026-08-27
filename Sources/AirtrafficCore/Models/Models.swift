@@ -158,11 +158,18 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     /// deep: a subtask never has subtasks of its own.
     public var parentId: String?
     public var sessionIds: [String]
+    /// Whether the per-task command already ran for this row, and how it went.
+    /// Nil means it never ran, which is the only state that lets it start.
+    public var automationState: AutomationState?
+    /// The directory that command wrote into, opened from the board in the
+    /// Finder. Rows written by an earlier build hold a single file instead.
+    public var artifactPath: String?
 
     public init(
         id: String, title: String, detail: String, status: TaskStatus, rank: Int?,
         isToday: Bool = false, source: TaskSource, createdAt: Date, updatedAt: Date,
-        completedAt: Date? = nil, parentId: String? = nil, sessionIds: [String]
+        completedAt: Date? = nil, parentId: String? = nil, sessionIds: [String],
+        automationState: AutomationState? = nil, artifactPath: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -176,6 +183,8 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         self.completedAt = completedAt
         self.parentId = parentId
         self.sessionIds = sessionIds
+        self.automationState = automationState
+        self.artifactPath = artifactPath
     }
 
     public var isSubtask: Bool { parentId != nil }
