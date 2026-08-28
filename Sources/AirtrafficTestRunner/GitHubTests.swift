@@ -61,7 +61,7 @@ struct GitHubTests {
                 open: [item(title: "バグを直す（改題）")], existing: first,
                 settings: GitHubSettings(enabled: true))
             expectEqual(second.count, 1)
-            expectEqual(second[0].title, "#1 バグを直す（改題）")
+            expectEqual(second[0].title, "issue #1 バグを直す（改題）")
         }
 
         await kit.run("an archived row is never rebuilt") {
@@ -85,14 +85,23 @@ struct GitHubTests {
             let rows = GitHubTaskSync.upserts(
                 open: [review], existing: [], settings: GitHubSettings(enabled: true))
             expectEqual(rows.count, 1)
-            expectEqual(rows[0].title, "レビュー: #7 バグを直す")
+            expectEqual(rows[0].title, "レビュー: PR #7 バグを直す")
         }
 
-        await kit.run("the user's own work carries its number too") {
+        await kit.run("the user's own work carries its kind and number too") {
             let mine = item(number: 8, relation: .authored, isPullRequest: true)
             let rows = GitHubTaskSync.upserts(
                 open: [mine], existing: [], settings: GitHubSettings(enabled: true))
-            expectEqual(rows[0].title, "#8 バグを直す")
+            expectEqual(rows[0].title, "PR #8 バグを直す")
+        }
+
+        await kit.run("an issue and a pull request are told apart on the board") {
+            let rows = GitHubTaskSync.upserts(
+                open: [item(number: 3), item(number: 4, isPullRequest: true)], existing: [],
+                settings: GitHubSettings(enabled: true))
+            expectEqual(rows.count, 2)
+            expectEqual(rows.first { $0.id == "gh:alex/demo#3" }?.title, "issue #3 バグを直す")
+            expectEqual(rows.first { $0.id == "gh:alex/demo#4" }?.title, "PR #4 バグを直す")
         }
 
         await kit.run("a re-scan never stacks the review prefix twice") {
@@ -109,11 +118,23 @@ struct GitHubTests {
                 open: [titled], existing: first, settings: GitHubSettings(enabled: true))
             expectEqual(third.count, 0)
             let numbered = item(
-                number: 7, title: "#7 バグを直す", relation: .reviewRequested,
+                number: 7, title: "PR #7 バグを直す", relation: .reviewRequested,
                 isPullRequest: true)
             let fourth = GitHubTaskSync.upserts(
                 open: [numbered], existing: first, settings: GitHubSettings(enabled: true))
             expectEqual(fourth.count, 0)
+        }
+
+        await kit.run("a row from the older numbering is rewritten once") {
+            let review = item(number: 7, relation: .reviewRequested, isPullRequest: true)
+            let old = task(id: review.taskId, title: "レビュー: #7 バグを直す")
+            let rows = GitHubTaskSync.upserts(
+                open: [review], existing: [old], settings: GitHubSettings(enabled: true))
+            expectEqual(rows.count, 1)
+            expectEqual(rows[0].title, "レビュー: PR #7 バグを直す")
+            let again = GitHubTaskSync.upserts(
+                open: [review], existing: rows, settings: GitHubSettings(enabled: true))
+            expectEqual(again.count, 0)
         }
 
         await kit.run("a review request outranks the user's own pull request") {

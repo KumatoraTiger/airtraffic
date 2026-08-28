@@ -52,23 +52,40 @@ public enum GitHubTaskSync {
     /// so the board says what the row asks of them before its subject.
     public static let reviewPrefix = "レビュー: "
 
-    /// The `#123 ` marker put in front of every GitHub title, so the board
-    /// says which issue or pull request the row stands for.
-    public static func numberPrefix(for item: GitHubItem) -> String { "#\(item.number) " }
+    /// The `PR #123 ` / `issue #123 ` marker put in front of every GitHub
+    /// title, so the board says what kind of item the row stands for and
+    /// which one it is.
+    public static func kindPrefix(for item: GitHubItem) -> String {
+        "\(item.isPullRequest ? "PR" : "issue") #\(item.number) "
+    }
 
-    /// The title of a GitHub task: the item's number, then the item's own
-    /// title, with 「レビュー: 」 in front when the item is a review request.
+    /// The title of a GitHub task: what the item is and its number, then the
+    /// item's own title, with 「レビュー: 」 in front when the item is a review
+    /// request.
     ///
-    /// The prefixes are stripped off the incoming title before being put back,
-    /// so a re-scan never stacks them and an upstream title that already reads
-    /// 「レビュー: …」 is not doubled.
+    /// The markers are stripped off the incoming title before being put back,
+    /// so a re-scan never stacks them, a row written by an older build is
+    /// rewritten into the current convention, and an upstream title that
+    /// already reads 「レビュー: …」 is not doubled.
     public static func title(for item: GitHubItem) -> String {
-        let number = numberPrefix(for: item)
-        var body = Substring(item.title)
-        if body.hasPrefix(reviewPrefix) { body = body.dropFirst(reviewPrefix.count) }
-        if body.hasPrefix(number) { body = body.dropFirst(number.count) }
-        let titled = number + body
+        let titled = kindPrefix(for: item) + strippedTitle(item.title, number: item.number)
         return item.relation == .reviewRequested ? reviewPrefix + titled : titled
+    }
+
+    /// The subject alone: every marker this type ever wrote in front of a
+    /// title, removed in any order and any number of times.
+    private static func strippedTitle(_ title: String, number: Int) -> String {
+        let markers = [reviewPrefix, "PR #\(number) ", "issue #\(number) ", "#\(number) "]
+        var body = Substring(title)
+        var stripping = true
+        while stripping {
+            stripping = false
+            for marker in markers where body.hasPrefix(marker) {
+                body = body.dropFirst(marker.count)
+                stripping = true
+            }
+        }
+        return String(body)
     }
 
     /// The detail line of a GitHub task: what the item is, then its link.
