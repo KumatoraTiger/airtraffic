@@ -120,8 +120,7 @@ struct BoardView: View {
                 TextField("タスクを追加…", text: $newTitle)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { submit() }
-                Button("追加") { submit() }
-                    .disabled(newTitle.isEmpty)
+                InstantButton(title: "追加", enabled: !newTitle.isEmpty) { submit() }
             }
             .padding(.vertical, 2)
         } header: {
@@ -175,17 +174,15 @@ struct BoardView: View {
     private func collapsibleHeader(
         _ title: String, symbol: String, expanded: Binding<Bool>
     ) -> some View {
-        Button {
-            withAnimation { expanded.wrappedValue.toggle() }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
-                    .font(.caption2)
-                Label(title, systemImage: symbol)
-            }
-            .foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+            Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                .font(.caption2)
+            Label(title, systemImage: symbol)
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .instantClick(expanded.wrappedValue ? "折りたたむ" : "開く") {
+            withAnimation(.easeOut(duration: 0.16)) { expanded.wrappedValue.toggle() }
+        }
     }
 
     // MARK: - Drag & drop between 今日やる and タスク

@@ -22,17 +22,15 @@ struct EntryRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if let task = entry.task {
-                    Button {
-                        Task {
-                            await model.setTaskStatus(
-                                task, task.status == .done ? .todo : .done)
+                    Image(systemName: task.status == .done ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(task.status == .done ? .green : .secondary)
+                        .instantClick("完了にする") {
+                            Task {
+                                await model.setTaskStatus(
+                                    task, task.status == .done ? .todo : .done)
+                            }
                         }
-                    } label: {
-                        Image(systemName: task.status == .done ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(task.status == .done ? .green : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("完了にする")
+                        .help("完了にする")
                 } else {
                     Image(systemName: statusSymbol(entry.liveStatus ?? .idle))
                         .font(.caption)
@@ -55,15 +53,10 @@ struct EntryRow: View {
                 // tap gesture on the row surface (even a simultaneous one)
                 // keeps NSTableView from ever starting a row drag, which
                 // silently kills both reorder and cross-section drops.
-                Button {
-                    withAnimation { expanded.toggle() }
-                } label: {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .help(expanded ? "折りたたむ" : "詳細を表示")
+                // The chevron is a real NSButton for the mirror-image reason —
+                // see InstantControls.swift.
+                DisclosureChevron(
+                    expanded: $expanded, help: (open: "折りたたむ", closed: "詳細を表示"))
                 Spacer()
                 if let project = entry.sessions.first?.projectName {
                     Text(project)
@@ -97,12 +90,12 @@ struct EntryRow: View {
                     sourceBadge(task)
                     automationBadge(task)
                 } else {
-                    Button("タスクにする") {
+                    InstantButton(
+                        title: "タスクにする",
+                        help: "タスクにする（セッションが終わっても消えなくなります）"
+                    ) {
                         Task { await model.keepEntry(entry) }
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("タスクにする（セッションが終わっても消えなくなります）")
                     linkMenu
                 }
             }
@@ -235,9 +228,9 @@ struct EntryRow: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.caption)
                 .onSubmit { submitSubtask(task) }
-            Button("追加") { submitSubtask(task) }
-                .controlSize(.small)
-                .disabled(newSubtaskTitle.isEmpty)
+            InstantButton(title: "追加", enabled: !newSubtaskTitle.isEmpty) {
+                submitSubtask(task)
+            }
         }
         .padding(.leading, 14)
     }
@@ -278,20 +271,17 @@ struct EntryRow: View {
 
     /// Attaches this taskless entry to an existing open task.
     private var linkMenu: some View {
-        Menu {
-            ForEach(openTasks) { task in
-                Button(linkLabel(task)) {
+        InstantMenuButton(
+            title: "紐づけ",
+            help: "既存のタスクに紐づける（タスクの下にぶら下がります）",
+            enabled: !openTasks.isEmpty
+        ) {
+            openTasks.map { task in
+                InstantMenuButton.Item(title: linkLabel(task)) {
                     Task { await model.linkEntry(entry, to: task) }
                 }
             }
-        } label: {
-            Text("紐づけ")
         }
-        .menuStyle(.borderlessButton)
-        .controlSize(.small)
-        .fixedSize()
-        .disabled(openTasks.isEmpty)
-        .help("既存のタスクに紐づける（タスクの下にぶら下がります）")
     }
 
     private var openTasks: [TaskItem] {
@@ -326,15 +316,14 @@ struct EntryRow: View {
     /// In and out of the 「今日やる」 section with one click. Filled sun while
     /// the task is in; the flag never expires on its own.
     private func todayToggle(_ task: TaskItem) -> some View {
-        Button {
-            Task { await model.setTaskToday(task, !task.isToday) }
-        } label: {
-            Image(systemName: task.isToday ? "sun.max.fill" : "sun.max")
-                .font(.caption)
-                .foregroundStyle(task.isToday ? .orange : .secondary)
-        }
-        .buttonStyle(.plain)
-        .help(task.isToday ? "今日やるから外す" : "今日やるに入れる")
+        let label = task.isToday ? "今日やるから外す" : "今日やるに入れる"
+        return Image(systemName: task.isToday ? "sun.max.fill" : "sun.max")
+            .font(.caption)
+            .foregroundStyle(task.isToday ? .orange : .secondary)
+            .instantClick(label) {
+                Task { await model.setTaskToday(task, !task.isToday) }
+            }
+            .help(label)
     }
 
     /// A live countdown on the focused task's row. The running state uses
@@ -374,13 +363,9 @@ struct EntryRow: View {
             .foregroundStyle(color)
         // A GitHub row exists to be opened, so its badge is the link.
         if task.source == .github, let url = githubURL(task) {
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                capsule
-            }
-            .buttonStyle(.plain)
-            .help("GitHub で開く")
+            capsule
+                .instantClick("GitHub で開く") { NSWorkspace.shared.open(url) }
+                .help("GitHub で開く")
         } else {
             capsule
         }
@@ -401,15 +386,11 @@ struct EntryRow: View {
                 .help("解説を生成中")
         case .done:
             if let path = task.artifactPath {
-                Button {
-                    reveal(path)
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                }
-                .buttonStyle(.plain)
-                .help("生成物のフォルダを開く")
+                Image(systemName: "folder")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .instantClick("生成物のフォルダを開く") { reveal(path) }
+                    .help("生成物のフォルダを開く")
             }
         case .failed:
             Image(systemName: "exclamationmark.triangle")
@@ -502,20 +483,17 @@ private struct SubtaskRow: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 if let task {
-                    Button {
+                    Image(
+                        systemName: task.status == .done ? "checkmark.circle.fill" : "circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(task.status == .done ? .green : .secondary)
+                    .instantClick("完了にする") {
                         Task {
                             await model.setTaskStatus(
                                 task, task.status == .done ? .todo : .done)
                         }
-                    } label: {
-                        Image(
-                            systemName: task.status == .done
-                                ? "checkmark.circle.fill" : "circle"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(task.status == .done ? .green : .secondary)
                     }
-                    .buttonStyle(.plain)
                     .help("完了にする")
                 }
                 Text(entry.title)
@@ -524,15 +502,9 @@ private struct SubtaskRow: View {
                     .foregroundStyle(task?.status == .done ? .secondary : .primary)
                     .lineLimit(1)
                 if !entry.sessions.isEmpty {
-                    Button {
-                        withAnimation { expanded.toggle() }
-                    } label: {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(expanded ? "折りたたむ" : "セッションを表示")
+                    DisclosureChevron(
+                        expanded: $expanded,
+                        help: (open: "折りたたむ", closed: "セッションを表示"), size: 8)
                 }
                 Spacer()
                 ForEach(agents, id: \.self) { agent in
@@ -630,11 +602,9 @@ private struct SessionDetail: View {
                         .foregroundStyle(todo.status == .completed ? .green : .secondary)
                     Text(todo.content).font(.caption)
                     Spacer()
-                    Button("タスクにする") {
+                    InstantButton(title: "タスクにする", look: .link) {
                         Task { await model.promoteTodo(todo, from: session) }
                     }
-                    .buttonStyle(.link)
-                    .font(.caption2)
                 }
             }
         }
