@@ -355,8 +355,13 @@ struct AutomationTests {
             let runner = AutomationRunner(base: base)
             let task = reviewTask()
             let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id).path
+            // The page lives in a subdirectory, the way a wrapper keeps each
+            // skill's output apart: overwriting it leaves the parent's own
+            // date untouched, so the top level alone would see nothing.
             let settings = AutomationSettings(
-                enabled: true, commandLine: "/bin/sh -c 'echo ok > \"$0/page.html\"' {outDir}",
+                enabled: true,
+                commandLine:
+                    "/bin/sh -c 'mkdir -p \"$0/sub\"; echo ok > \"$0/sub/page.html\"' {outDir}",
                 workingDirectory: "/tmp", allowedRepos: ["alex/demo"])
 
             expectEqual(await runner.run(task: task, settings: settings), .produced(directory))

@@ -159,17 +159,23 @@ public actor AutomationRunner {
         var modified: Date?
     }
 
+    /// Every file under the directory, subdirectories included. A wrapper
+    /// keeps each skill's pages in its own subdirectory, and overwriting a
+    /// file there leaves the parent directory's own date untouched, so the
+    /// top level alone would miss a rerun that rewrote the same page.
     private func files(in directory: URL) -> Set<FileStamp> {
-        let found =
-            (try? FileManager.default.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        return Set(
-            found.map { url in
-                FileStamp(
-                    path: url.path,
-                    modified: try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                        .contentModificationDate)
-            })
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
+        guard
+            let found = FileManager.default.enumerator(
+                at: directory, includingPropertiesForKeys: keys)
+        else { return [] }
+        var stamps: Set<FileStamp> = []
+        for case let url as URL in found {
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile == true else { continue }
+            stamps.insert(FileStamp(path: url.path, modified: values?.contentModificationDate))
+        }
+        return stamps
     }
 
 }
