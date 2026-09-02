@@ -160,6 +160,26 @@ final class AppModel {
             UserDefaults.standard.set(Array(automationRepos).sorted(), forKey: Self.automationReposKey)
         }
     }
+    /// Review-comment trigger: runs a command when a bot reviews one of the
+    /// user's own pull requests.
+    var automationCommentTrigger: Bool {
+        didSet {
+            UserDefaults.standard.set(automationCommentTrigger, forKey: Self.automationCommentKey)
+        }
+    }
+    var automationCommentCommand: String {
+        didSet {
+            UserDefaults.standard.set(
+                automationCommentCommand, forKey: Self.automationCommentCommandKey)
+        }
+    }
+    /// How many times one pull request may fire the command in 24 hours.
+    var automationCommentDailyLimit: Int {
+        didSet {
+            UserDefaults.standard.set(
+                automationCommentDailyLimit, forKey: Self.automationCommentLimitKey)
+        }
+    }
     /// What the last command did, for the settings screen.
     private(set) var automationStatus: String?
 
@@ -167,7 +187,9 @@ final class AppModel {
         AutomationSettings(
             enabled: automationEnabled, relations: automationRelations,
             commandLine: automationCommand, workingDirectory: automationWorkingDirectory,
-            allowedRepos: automationRepos)
+            allowedRepos: automationRepos, commentTrigger: automationCommentTrigger,
+            commentCommandLine: automationCommentCommand,
+            commentDailyLimit: automationCommentDailyLimit)
     }
 
     /// Chime preferences for the pomodoro, persisted across launches.
@@ -242,6 +264,9 @@ final class AppModel {
     static let automationCommandKey = "automation.command"
     static let automationCwdKey = "automation.workingDirectory"
     static let automationReposKey = "automation.repos"
+    static let automationCommentKey = "automation.commentTrigger"
+    static let automationCommentCommandKey = "automation.commentCommand"
+    static let automationCommentLimitKey = "automation.commentDailyLimit"
     /// GitHub is polled far less often than the transcripts: it is a network
     /// call, and an issue list does not change every three seconds.
     private static let githubInterval: TimeInterval = 300
@@ -281,6 +306,12 @@ final class AppModel {
             UserDefaults.standard.string(forKey: Self.automationCwdKey) ?? ""
         automationRepos = Set(
             UserDefaults.standard.stringArray(forKey: Self.automationReposKey) ?? [])
+        automationCommentTrigger =
+            UserDefaults.standard.object(forKey: Self.automationCommentKey) as? Bool ?? false
+        automationCommentCommand =
+            UserDefaults.standard.string(forKey: Self.automationCommentCommandKey) ?? ""
+        automationCommentDailyLimit =
+            UserDefaults.standard.object(forKey: Self.automationCommentLimitKey) as? Int ?? 3
         soundSettings =
             UserDefaults.standard.data(forKey: "pomodoroSound")
             .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
@@ -362,6 +393,7 @@ final class AppModel {
             ? "\(stamp) 同期しました（更新なし）" : "\(stamp) \(result.upserts.count) 件を更新しました"
         await refreshLists()
         await runAutomationPass()
+        await runCommentPass()
     }
 
     // MARK: - Per-task command
@@ -399,6 +431,59 @@ final class AppModel {
         }
     }
 
+    // MARK: - Review-comment command
+
+    /// Runs the user's command once for each pull request of theirs a bot has
+    /// just reviewed.
+    ///
+    /// The event is recorded before the command starts, exactly like the
+    /// arrival pass writes the row's state first: an interrupted run has to
+    /// look like "already handled", because the alternative is an agent
+    /// started twice on the same review.
+    func runCommentPass() async {
+        guard let store, !automationRunning else { return }
+        let settings = automationSettings
+        let existing = (try? await store.tasks(includeArchived: true)) ?? []
+        let candidates = CommentTrigger.candidates(tasks: existing, settings: settings)
+        guard !candidates.isEmpty else { return }
+        let recorded = (try? await store.automationEventIds()) ?? []
+        let events = await githubInbox.commentEvents(candidates: candidates, recorded: recorded)
+        guard !events.isEmpty else { return }
+        let runsToday =
+            (try? await store.automationEventCounts(
+                since: Date().addingTimeInterval(-CommentTrigger.dailyWindow))) ?? [:]
+        let selection = CommentTrigger.select(
+            events: events, recorded: recorded, runsToday: runsToday, settings: settings)
+        if let held = selection.blocked.first {
+            automationStatus =
+                "\(held.repo)#\(held.number) は24時間の実行上限"
+                + "（\(settings.commentDailyLimit) 回）に達したので実行しませんでした"
+        }
+        guard !selection.run.isEmpty else { return }
+
+        automationRunning = true
+        defer { automationRunning = false }
+        let byId = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for event in selection.run {
+            guard let task = byId[event.taskId] else { continue }
+            try? await store.recordAutomationEvent(id: event.id, taskId: task.id)
+            try? await store.setAutomation(taskId: task.id, state: .running)
+            await refreshLists()
+            let outcome = await automationRunner.run(
+                task: task, settings: settings, event: event)
+            let stamp = Date().formatted(date: .omitted, time: .shortened)
+            switch outcome {
+            case .produced(let path):
+                try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
+                automationStatus = "\(stamp) \(event.author) のレビューに対して実行しました"
+            case .failed(let reason):
+                try? await store.setAutomation(taskId: task.id, state: .failed)
+                automationStatus = "\(stamp) \(task.title): \(reason)"
+            }
+            await refreshLists()
+        }
+    }
+
     /// Clears one row's result so the command can run again, for the case
     /// where it failed for a reason the user has since fixed.
     func resetAutomation(_ task: TaskItem) async {
@@ -411,6 +496,7 @@ final class AppModel {
     private func refreshFromStore() async {
         guard let store else { return }
         try? await store.pruneLabels(olderThan: 30 * 24 * 3600)
+        try? await store.pruneAutomationEvents(olderThan: 30 * 24 * 3600)
         labels = (try? await store.labels()) ?? [:]
         tasks = (try? await store.tasks()) ?? []
         preferences = (try? await store.preferences()) ?? []

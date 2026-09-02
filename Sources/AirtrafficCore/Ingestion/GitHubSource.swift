@@ -86,6 +86,47 @@ public enum GitHubClosure: Sendable {
     case unknown
 }
 
+/// One review comment on a pull request, reduced to what the trigger needs.
+///
+/// The body is deliberately absent. It is text somebody else wrote, it is the
+/// injection surface this whole feature has to live with, and the command that
+/// runs afterwards can read it from GitHub itself with the credential it
+/// already holds.
+public struct GitHubComment: Hashable, Sendable {
+    /// GitHub's own comment id, which is what makes an event identifiable.
+    public var id: Int
+    public var author: String
+    /// True when GitHub itself types the account as a bot, or when the login
+    /// carries the `[bot]` suffix every GitHub App account is given.
+    public var isBot: Bool
+    public var url: String
+    public var createdAt: Date
+
+    public init(id: Int, author: String, isBot: Bool, url: String, createdAt: Date) {
+        self.id = id
+        self.author = author
+        self.isBot = isBot
+        self.url = url
+        self.createdAt = createdAt
+    }
+}
+
+/// One entry of a pull request's check rollup, reduced to the two fields that
+/// say whether it is still running.
+///
+/// GitHub answers with two shapes under one list: a check run carries
+/// `status`, a commit status carries `state`. Both are kept, and neither is
+/// interpreted here.
+public struct GitHubCheck: Hashable, Sendable {
+    public var status: String?
+    public var state: String?
+
+    public init(status: String?, state: String?) {
+        self.status = status
+        self.state = state
+    }
+}
+
 // MARK: - Source
 
 /// Reads the user's GitHub work through the `gh` CLI.
@@ -159,6 +200,38 @@ public struct GitHubSource: Sendable {
         return row.pullRequest?.mergedAt == nil ? .closed : .merged
     }
 
+    /// The checks GitHub is running on one pull request, or nil when it could
+    /// not be asked. An empty array means the pull request has no checks.
+    public func checks(repo: String, number: Int) -> [GitHubCheck]? {
+        guard isAvailable,
+            let output = run([
+                "pr", "view", "\(number)", "-R", repo, "--json", "statusCheckRollup",
+            ]),
+            let data = output.data(using: .utf8),
+            let row = try? JSONDecoder().decode(ChecksRow.self, from: data)
+        else { return nil }
+        return (row.statusCheckRollup ?? []).map { GitHubCheck(status: $0.status, state: $0.state) }
+    }
+
+    /// The newest review comments on one pull request, newest first.
+    ///
+    /// Only the inline review comments are read. A review submitted with a body
+    /// and no inline comment is missed by this, which is the price of asking
+    /// one endpoint per pull request: this is the only comment endpoint that
+    /// sorts newest first, so a single short page answers the question
+    /// whatever the pull request's history looks like.
+    public func reviewComments(repo: String, number: Int, limit: Int = 20) -> [GitHubComment]? {
+        guard isAvailable,
+            let output = run([
+                "api",
+                "repos/\(repo)/pulls/\(number)/comments?sort=created&direction=desc&per_page=\(limit)",
+            ]),
+            let data = output.data(using: .utf8),
+            let rows = try? JSONDecoder().decode([CommentRow].self, from: data)
+        else { return nil }
+        return rows.map(\.comment)
+    }
+
     // MARK: - Decoding
 
     private struct SearchRow: Decodable {
@@ -194,6 +267,42 @@ public struct GitHubSource: Sendable {
         enum CodingKeys: String, CodingKey {
             case state
             case pullRequest = "pull_request"
+        }
+    }
+
+    private struct ChecksRow: Decodable {
+        struct Check: Decodable {
+            let status: String?
+            let state: String?
+        }
+        let statusCheckRollup: [Check]?
+    }
+
+    private struct CommentRow: Decodable {
+        struct User: Decodable {
+            let login: String
+            let type: String?
+        }
+        let id: Int
+        let user: User?
+        let htmlUrl: String?
+        let createdAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case user
+            case htmlUrl = "html_url"
+            case createdAt = "created_at"
+        }
+
+        var comment: GitHubComment {
+            let login = user?.login ?? ""
+            return GitHubComment(
+                id: id,
+                author: login,
+                isBot: CommentTrigger.isBot(login: login, type: user?.type),
+                url: htmlUrl ?? "",
+                createdAt: createdAt.flatMap(GitHubSource.parseDate) ?? Date())
         }
     }
 

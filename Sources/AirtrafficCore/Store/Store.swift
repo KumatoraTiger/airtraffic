@@ -50,6 +50,14 @@ public actor Store {
         try Self.migrateTaskAutomation(db)
         try db.execute(
             """
+            CREATE TABLE IF NOT EXISTS automation_events (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            """)
+        try db.execute(
+            """
             CREATE TABLE IF NOT EXISTS preferences (
                 id TEXT PRIMARY KEY,
                 text TEXT NOT NULL,
@@ -202,6 +210,47 @@ public actor Store {
                 artifactPath.map { .text($0) } ?? .null,
                 .text(taskId),
             ])
+    }
+
+    // MARK: - Automation events
+
+    /// Every event whose command was already started.
+    ///
+    /// The key of an event is the comment that caused it, so this set is what
+    /// makes one bot review run the command once and not once per pass.
+    public func automationEventIds() throws -> Set<String> {
+        Set(try db.query("SELECT id FROM automation_events").map { $0.text("id") })
+    }
+
+    /// Marks an event as started. Written BEFORE the command runs: a crash
+    /// mid-run has to look like "already handled", never like "never ran".
+    public func recordAutomationEvent(id: String, taskId: String, now: Date = Date()) throws {
+        try db.execute(
+            """
+            INSERT OR IGNORE INTO automation_events (id, task_id, created_at) VALUES (?, ?, ?)
+            """, [.text(id), .text(taskId), .real(now.timeIntervalSince1970)])
+    }
+
+    /// How many events each task fired inside the window, for the per-pull-
+    /// request daily limit. Counted from the same rows the dedupe uses, so a
+    /// run that was started and then crashed still counts.
+    public func automationEventCounts(since: Date) throws -> [String: Int] {
+        let rows = try db.query(
+            """
+            SELECT task_id, COUNT(*) AS runs FROM automation_events
+            WHERE created_at >= ? GROUP BY task_id
+            """, [.real(since.timeIntervalSince1970)])
+        var counts: [String: Int] = [:]
+        for row in rows { counts[row.text("task_id")] = Int(row.int("runs")) }
+        return counts
+    }
+
+    /// Housekeeping only: an event this old names a comment no pass will see
+    /// again, since a comment older than a day never fires one.
+    public func pruneAutomationEvents(olderThan age: TimeInterval, now: Date = Date()) throws {
+        try db.execute(
+            "DELETE FROM automation_events WHERE created_at < ?",
+            [.real(now.timeIntervalSince1970 - age)])
     }
 
     /// Writes a task back exactly as it was, links included. Unlike

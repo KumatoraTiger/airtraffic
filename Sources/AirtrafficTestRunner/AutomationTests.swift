@@ -20,14 +20,36 @@ struct AutomationTests {
             automationState: state)
     }
 
+    private func authoredTask(
+        repo: String = "alex/demo", number: Int = 7, status: TaskStatus = .todo
+    ) -> TaskItem {
+        reviewTask(repo: repo, number: number, status: status, relation: .authored)
+    }
+
+    private func comment(
+        id: Int, author: String = "coderabbitai[bot]", type: String? = "Bot",
+        repo: String = "alex/demo", number: Int = 7, ageInSeconds: TimeInterval = 600,
+        now: Date = Date()
+    ) -> GitHubComment {
+        GitHubComment(
+            id: id, author: author,
+            isBot: CommentTrigger.isBot(login: author, type: type),
+            url: "https://github.com/\(repo)/pull/\(number)#discussion_r\(id)",
+            createdAt: now.addingTimeInterval(-ageInSeconds))
+    }
+
     private func settings(
         enabled: Bool = true, command: String = "/usr/bin/true {url}",
         repos: Set<String> = ["alex/demo"],
-        relations: Set<GitHubRelation> = [.reviewRequested]
+        relations: Set<GitHubRelation> = [.reviewRequested],
+        commentTrigger: Bool = true,
+        commentCommand: String = "/usr/bin/true {commentUrl}",
+        commentDailyLimit: Int = 3
     ) -> AutomationSettings {
         AutomationSettings(
             enabled: enabled, relations: relations, commandLine: command,
-            allowedRepos: repos)
+            allowedRepos: repos, commentTrigger: commentTrigger,
+            commentCommandLine: commentCommand, commentDailyLimit: commentDailyLimit)
     }
 
     func runAll() async {
@@ -151,6 +173,153 @@ struct AutomationTests {
             expect(!TaskAutomation.isRepo("../demo"), "no parent directory")
             expect(!TaskAutomation.isRepo("alex/demo/extra"), "two segments only")
             expect(TaskAutomation.isRepo("alex/demo.io"), "a dot inside a name is fine")
+        }
+
+        await kit.run("a bot is recognised by its type or its login suffix") {
+            expect(CommentTrigger.isBot(login: "coderabbitai[bot]", type: nil), "the [bot] suffix")
+            expect(CommentTrigger.isBot(login: "copilot-pull-request-reviewer", type: "Bot"), "typed")
+            expect(!CommentTrigger.isBot(login: "alex", type: "User"), "a person is not a bot")
+        }
+
+        await kit.run("only the user's own pull requests are asked about") {
+            let mine = authoredTask()
+            let review = reviewTask(number: 8)
+            let elsewhere = authoredTask(repo: "alex/other", number: 9)
+            let finished = authoredTask(number: 10, status: .done)
+            let candidates = CommentTrigger.candidates(
+                tasks: [mine, review, elsewhere, finished], settings: settings())
+            expectEqual(candidates.map(\.id), [mine.id])
+        }
+
+        await kit.run("the comment trigger stays off without its own command") {
+            let mine = authoredTask()
+            expect(
+                CommentTrigger.candidates(
+                    tasks: [mine], settings: settings(commentCommand: "  ")
+                ).isEmpty,
+                "no command, nothing to fire")
+            expect(
+                CommentTrigger.candidates(
+                    tasks: [mine], settings: settings(commentTrigger: false)
+                ).isEmpty,
+                "the trigger is off")
+        }
+
+        await kit.run("the newest bot comment of a batch names the event") {
+            let now = Date()
+            let comments = [
+                comment(id: 11, ageInSeconds: 900, now: now),
+                comment(id: 12, ageInSeconds: 800, now: now),
+                comment(id: 13, author: "alex", type: "User", ageInSeconds: 300, now: now),
+            ]
+            let event = try unwrap(
+                CommentTrigger.event(task: authoredTask(), comments: comments, now: now))
+            expectEqual(event.commentId, 12)
+            expectEqual(event.author, "coderabbitai[bot]")
+            expectEqual(event.id, "ghc:alex/demo#7@12")
+        }
+
+        await kit.run("a review still being written, or long since read, fires nothing") {
+            let now = Date()
+            let task = authoredTask()
+            expect(
+                CommentTrigger.event(
+                    task: task, comments: [comment(id: 1, ageInSeconds: 60, now: now)], now: now)
+                    == nil,
+                "the batch has not settled")
+            expect(
+                CommentTrigger.event(
+                    task: task, comments: [comment(id: 2, ageInSeconds: 48 * 3600, now: now)],
+                    now: now) == nil,
+                "older than a day")
+            expect(
+                CommentTrigger.event(
+                    task: task,
+                    comments: [comment(id: 3, author: "alex", type: "User", now: now)], now: now)
+                    == nil,
+                "a person reviewed it")
+        }
+
+        await kit.run("an event already recorded never runs twice") {
+            let now = Date()
+            let event = try unwrap(
+                CommentTrigger.event(
+                    task: authoredTask(), comments: [comment(id: 21, now: now)], now: now))
+            expect(
+                CommentTrigger.select(
+                    events: [event], recorded: [event.id], runsToday: [:], settings: settings()
+                )
+                .run.isEmpty,
+                "the same comment is done with")
+            expectEqual(
+                CommentTrigger.select(
+                    events: [event], recorded: ["ghc:alex/demo#7@20"], runsToday: [:],
+                    settings: settings()
+                ).run.map(\.id),
+                [event.id])
+        }
+
+        await kit.run("a pull request that hit its daily limit is held back, not dropped") {
+            let now = Date()
+            let event = try unwrap(
+                CommentTrigger.event(
+                    task: authoredTask(), comments: [comment(id: 22, now: now)], now: now))
+            let selection = CommentTrigger.select(
+                events: [event], recorded: [], runsToday: [event.taskId: 3],
+                settings: settings())
+            expect(selection.run.isEmpty, "nothing runs")
+            expectEqual(selection.blocked.map(\.id), [event.id])
+
+            let raised = CommentTrigger.select(
+                events: [event], recorded: [], runsToday: [event.taskId: 3],
+                settings: settings(commentDailyLimit: 5))
+            expectEqual(raised.run.map(\.id), [event.id])
+        }
+
+        await kit.run("the command waits for the checks, whatever they conclude") {
+            expectEqual(CommentTrigger.checksState([]), ChecksState.none)
+            expectEqual(
+                CommentTrigger.checksState([
+                    GitHubCheck(status: "COMPLETED", state: nil),
+                    GitHubCheck(status: nil, state: "SUCCESS"),
+                ]), ChecksState.complete)
+            expectEqual(
+                CommentTrigger.checksState([
+                    GitHubCheck(status: "COMPLETED", state: nil),
+                    GitHubCheck(status: "IN_PROGRESS", state: nil),
+                ]), ChecksState.pending)
+            expectEqual(
+                CommentTrigger.checksState([GitHubCheck(status: nil, state: "PENDING")]),
+                ChecksState.pending)
+            expectEqual(
+                CommentTrigger.checksState([GitHubCheck(status: nil, state: nil)]),
+                ChecksState.pending)
+
+            expect(
+                CommentTrigger.isReady(checks: [GitHubCheck(status: "COMPLETED", state: nil)]),
+                "finished checks let it through")
+            expect(
+                CommentTrigger.isReady(checks: [GitHubCheck(status: nil, state: "FAILURE")]),
+                "a red build is what the command is for")
+            expect(!CommentTrigger.isReady(checks: nil), "GitHub could not be asked")
+        }
+
+        await kit.run("a comment event adds its own two placeholders") {
+            let now = Date()
+            let task = authoredTask()
+            let event = try unwrap(
+                CommentTrigger.event(task: task, comments: [comment(id: 31, now: now)], now: now))
+            let values = try unwrap(
+                TaskAutomation.values(for: task, outDir: "/tmp/out", event: event))
+            expectEqual(
+                TaskAutomation.arguments(
+                    commandLine: "agent {commentUrl} {author} {number}", values: values),
+                [
+                    "agent", "https://github.com/alex/demo/pull/7#discussion_r31",
+                    "coderabbitai[bot]", "7",
+                ])
+            let plain = try unwrap(TaskAutomation.values(for: task, outDir: "/tmp/out"))
+            expect(plain[.commentUrl] == nil, "the arrival command sees no comment")
         }
 
         await kit.run("an artifact directory is one flat name per task") {

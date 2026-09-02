@@ -159,6 +159,30 @@ struct StoreTests {
             expectEqual(try await store.tasks().first?.sessionIds, ["claude:s-1"])
         }
 
+        await TestKit.shared.run("store: an automation event is recorded once and pruned by age") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@12", taskId: "gh:alex/demo#7")
+            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@12", taskId: "gh:alex/demo#7")
+            expectEqual(try await store.automationEventIds(), ["ghc:alex/demo#7@12"])
+
+            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@13", taskId: "gh:alex/demo#7")
+            try await store.recordAutomationEvent(id: "ghc:alex/demo#9@14", taskId: "gh:alex/demo#9")
+            let counts = try await store.automationEventCounts(
+                since: Date().addingTimeInterval(-3600))
+            expectEqual(counts["gh:alex/demo#7"], 2)
+            expectEqual(counts["gh:alex/demo#9"], 1)
+            expect(
+                try await store.automationEventCounts(since: Date().addingTimeInterval(3600))
+                    .isEmpty,
+                "nothing inside an empty window")
+
+            try await store.pruneAutomationEvents(olderThan: 30 * 24 * 3600)
+            expectEqual(try await store.automationEventIds().count, 3)
+            try await store.pruneAutomationEvents(olderThan: -1)
+            expect(try await store.automationEventIds().isEmpty, "the old event is gone")
+        }
+
         await TestKit.shared.run("store: deleteTask removes the row and its links") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

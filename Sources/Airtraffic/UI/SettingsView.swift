@@ -247,6 +247,28 @@ struct AutomationSection: View {
                             }
                         }))
             }
+            Divider()
+            Toggle("自分の PR に bot がレビューコメントを付けたら実行する", isOn: $model.automationCommentTrigger)
+            TextField("レビューコメント用のコマンド", text: $model.automationCommentCommand)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+            Text(
+                "対象は自分が作った PR だけです。bot 以外のレビューでは動きません。"
+                    + "上の置換に加えて {commentUrl} {author} が使えます。"
+                    + "同じレビューで二度は動かず、コメントが増えたときだけまた動きます。"
+                    + "CI が走っている間は待ち、すべて終わってから実行します（成功・失敗は問いません）。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Stepper(
+                "同じ PR で24時間に実行する上限: \(model.automationCommentDailyLimit) 回",
+                value: $model.automationCommentDailyLimit, in: 1...20)
+            Text(
+                "修正を push すると bot がまた読み、それがまた実行のきっかけになります。"
+                    + "その往復が止まらないときのための上限です。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
             Text(
                 "実行されるコマンドは、他人が書いた PR の本文や差分を読みます。"
                     + "読み込んだ内容に指示が仕込まれていても実行されないよう、"

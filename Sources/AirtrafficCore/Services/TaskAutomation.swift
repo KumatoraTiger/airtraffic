@@ -27,19 +27,38 @@ public struct AutomationSettings: Sendable, Equatable {
     public var workingDirectory: String
     /// Repositories allowed to fire the command, as `owner/name`.
     public var allowedRepos: Set<String>
+    /// Whether a bot's review comment on the user's own pull request fires a
+    /// command too. Off by default, like everything that starts a process.
+    public var commentTrigger: Bool
+    /// The command a bot's review comment fires. Separate from `commandLine`
+    /// because the two jobs differ: one reads work that just arrived, the
+    /// other answers a review of work already written.
+    public var commentCommandLine: String
+    /// How many times one pull request may fire the command in 24 hours.
+    ///
+    /// The command pushes a fix, the bot reviews the push, and that is a new
+    /// event: this is what bounds that loop. The user owns the number because
+    /// how much of it is useful depends on their bot and their command.
+    public var commentDailyLimit: Int
 
     public init(
         enabled: Bool = false,
         relations: Set<GitHubRelation> = [.reviewRequested],
         commandLine: String = "",
         workingDirectory: String = "",
-        allowedRepos: Set<String> = []
+        allowedRepos: Set<String> = [],
+        commentTrigger: Bool = false,
+        commentCommandLine: String = "",
+        commentDailyLimit: Int = 3
     ) {
         self.enabled = enabled
         self.relations = relations
         self.commandLine = commandLine
         self.workingDirectory = workingDirectory
         self.allowedRepos = allowedRepos
+        self.commentTrigger = commentTrigger
+        self.commentCommandLine = commentCommandLine
+        self.commentDailyLimit = commentDailyLimit
     }
 }
 
@@ -57,6 +76,11 @@ public enum TaskAutomation {
         case title = "{title}"
         case taskId = "{taskId}"
         case outDir = "{outDir}"
+        /// Link to the review comment that fired the command. Only filled in
+        /// for a comment event; the arrival command never sees it.
+        case commentUrl = "{commentUrl}"
+        /// Login of the bot that wrote it, same condition.
+        case author = "{author}"
     }
 
     // MARK: - Planning
@@ -139,14 +163,16 @@ public enum TaskAutomation {
     /// Everything but the title is checked against its shape. The title is
     /// free text written by whoever opened the pull request, so it is passed
     /// through as one argument and nothing more is assumed about it.
-    public static func values(for task: TaskItem, outDir: String) -> [Placeholder: String]? {
+    public static func values(
+        for task: TaskItem, outDir: String, event: CommentEvent? = nil
+    ) -> [Placeholder: String]? {
         guard let reference = GitHubItem.reference(taskId: task.id) else { return nil }
         guard isRepo(reference.repo) else { return nil }
         guard let url = GitHubTaskSync.url(fromDetail: task.detail), isGitHubURL(url) else {
             return nil
         }
         let name = reference.repo.split(separator: "/").last.map(String.init) ?? reference.repo
-        return [
+        var values: [Placeholder: String] = [
             .url: url,
             .repo: reference.repo,
             .repoName: name,
@@ -155,6 +181,12 @@ public enum TaskAutomation {
             .taskId: task.id,
             .outDir: outDir,
         ]
+        if let event {
+            guard isGitHubURL(event.url) else { return nil }
+            values[.commentUrl] = event.url
+            values[.author] = event.author
+        }
+        return values
     }
 
     /// The command's arguments with the placeholders filled in. Substitution

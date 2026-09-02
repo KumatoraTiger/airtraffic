@@ -41,18 +41,27 @@ public actor AutomationRunner {
 
     /// Runs the command for one task. Never throws: every failure is an
     /// `Outcome.failed` carrying a line the board can show.
-    public func run(task: TaskItem, settings: AutomationSettings) -> Outcome {
+    ///
+    /// `event` says which command runs: the arrival command when it is nil,
+    /// the review-comment command when a bot's review is what triggered this.
+    /// Both write into the same per-task directory, so a row keeps one folder
+    /// however many times it ran.
+    public func run(
+        task: TaskItem, settings: AutomationSettings, event: CommentEvent? = nil
+    ) -> Outcome {
         let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
             return .failed("出力先を作成できませんでした")
         }
-        guard let values = TaskAutomation.values(for: task, outDir: directory.path) else {
+        guard let values = TaskAutomation.values(for: task, outDir: directory.path, event: event)
+        else {
             return .failed("タスクから GitHub の情報を読めませんでした")
         }
+        let commandLine = event == nil ? settings.commandLine : settings.commentCommandLine
         let arguments = TaskAutomation.arguments(
-            commandLine: settings.commandLine, values: values)
+            commandLine: commandLine, values: values)
         guard let command = arguments.first else { return .failed("コマンドが空です") }
         guard let executable = resolve(command) else {
             return .failed("\(command) が見つかりませんでした")

@@ -63,4 +63,38 @@ public actor GitHubInbox {
         let repos = Array(Set(items.map(\.repo))).sorted()
         return Result(upserts: upserts, repos: repos, available: true)
     }
+
+    /// Asks GitHub what a bot has said on each candidate pull request, and
+    /// returns the events worth running a command for.
+    ///
+    /// One request per pull request, off the main thread like the rest of this
+    /// actor. A pull request GitHub could not answer for is skipped rather
+    /// than treated as "no comments": silence here must never look like an
+    /// answer, the same rule `fetchOpen` follows.
+    ///
+    /// The checks are asked about second, and only for a pull request that
+    /// actually has an unhandled event. Most passes find none, so the extra
+    /// request is rare rather than one per pull request per pass.
+    public func commentEvents(
+        candidates: [TaskItem], recorded: Set<String>, now: Date = Date()
+    ) -> [CommentEvent] {
+        var events: [CommentEvent] = []
+        for task in candidates {
+            guard let reference = GitHubItem.reference(taskId: task.id) else { continue }
+            guard
+                let comments = source.reviewComments(
+                    repo: reference.repo, number: reference.number)
+            else { continue }
+            guard let event = CommentTrigger.event(task: task, comments: comments, now: now) else {
+                continue
+            }
+            // `CommentTrigger.select` filters these again and is the authority
+            // on what runs. Here it only saves the request below.
+            guard !recorded.contains(event.id) else { continue }
+            let checks = source.checks(repo: reference.repo, number: reference.number)
+            guard CommentTrigger.isReady(checks: checks) else { continue }
+            events.append(event)
+        }
+        return events
+    }
 }
