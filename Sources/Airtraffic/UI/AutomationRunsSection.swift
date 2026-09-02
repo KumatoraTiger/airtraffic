@@ -74,12 +74,14 @@ struct AutomationRunRow: View {
                 }
                 Spacer()
                 timing
+                // Shown for a failed run too: a wrapper that gives up writes
+                // its reason there, and that report is what the user wants.
                 if let path = run.artifactPath {
                     Image(systemName: "folder")
                         .font(.caption2)
-                        .foregroundStyle(.green)
-                        .instantClick("生成物のフォルダを開く") { revealArtifact(path) }
-                        .help("生成物のフォルダを開く")
+                        .foregroundStyle(run.state == .failed ? .orange : .green)
+                        .instantClick("出力先のフォルダを開く") { revealArtifact(path) }
+                        .help(run.state == .failed ? "失敗した実行の出力先を開く" : "生成物のフォルダを開く")
                 }
             }
             // The reason gets its own line: sharing the first one with the

@@ -438,9 +438,13 @@ final class AppModel {
             try? await store.finishAutomationRun(id: run.id, state: .done, artifactPath: path)
             try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
             automationStatus = "\(stamp) \(success)"
-        case .failed(let reason):
-            try? await store.finishAutomationRun(id: run.id, state: .failed, reason: reason)
-            try? await store.setAutomation(taskId: task.id, state: .failed)
+        case .failed(let reason, let path):
+            try? await store.finishAutomationRun(
+                id: run.id, state: .failed, reason: reason, artifactPath: path)
+            // A failure that wrote nothing keeps the folder an earlier run
+            // left on the task; there is nothing newer to point at.
+            try? await store.setAutomation(
+                taskId: task.id, state: .failed, artifactPath: path ?? task.artifactPath)
             automationStatus = "\(stamp) \(task.title): \(reason)"
         }
         await refreshLists()

@@ -345,7 +345,15 @@ struct EntryRow: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.caption2)
                 .foregroundStyle(.orange)
-                .help("解説の生成に失敗しました")
+                .help("コマンドが失敗しました")
+            // What it wrote before failing is usually the reason why.
+            if let path = task.artifactPath {
+                Image(systemName: "folder")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .instantClick("出力先のフォルダを開く") { revealArtifact(path) }
+                    .help("出力先のフォルダを開く")
+            }
         case nil:
             EmptyView()
         }

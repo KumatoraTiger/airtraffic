@@ -322,6 +322,57 @@ struct AutomationTests {
             expect(plain[.commentUrl] == nil, "the arrival command sees no comment")
         }
 
+        await kit.run("a failed run keeps the directory it wrote into, even on a rerun") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            let runner = AutomationRunner(base: base)
+            let task = reviewTask()
+            let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id).path
+            // The wrapper writes its reason to the same file name every time
+            // and exits non-zero, which is how a real one reports giving up.
+            let settings = AutomationSettings(
+                enabled: true, commandLine: "/bin/sh -c 'echo failed > \"$0/結果.md\"; exit 1' {outDir}",
+                workingDirectory: "/tmp", allowedRepos: ["alex/demo"])
+
+            for attempt in 1...2 {
+                // A second write inside the same second would carry the same
+                // modification date and look like nothing happened.
+                if attempt == 2 { try await Task.sleep(for: .milliseconds(1100)) }
+                let outcome = await runner.run(task: task, settings: settings)
+                guard case .failed(let reason, let path) = outcome else {
+                    return expect(false, "attempt \(attempt) should fail, got \(outcome)")
+                }
+                expect(reason.contains("終了コード 1"), "attempt \(attempt): \(reason)")
+                expect(path == directory, "attempt \(attempt) keeps the output directory")
+            }
+        }
+
+        await kit.run("a rerun that overwrites the same file still counts as produced") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            let runner = AutomationRunner(base: base)
+            let task = reviewTask()
+            let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id).path
+            let settings = AutomationSettings(
+                enabled: true, commandLine: "/bin/sh -c 'echo ok > \"$0/page.html\"' {outDir}",
+                workingDirectory: "/tmp", allowedRepos: ["alex/demo"])
+
+            expectEqual(await runner.run(task: task, settings: settings), .produced(directory))
+            try await Task.sleep(for: .milliseconds(1100))
+            // The overwritten page is new output.
+            expectEqual(await runner.run(task: task, settings: settings), .produced(directory))
+
+            let idle = AutomationSettings(
+                enabled: true, commandLine: "/bin/sh -c 'exit 0'", workingDirectory: "/tmp",
+                allowedRepos: ["alex/demo"])
+            guard case .failed(let reason, let path) = await runner.run(task: task, settings: idle)
+            else { return expect(false, "writing nothing is not success") }
+            expect(reason.contains("何も書かれませんでした"), reason)
+            expect(path == nil, "nothing new to point at")
+        }
+
         await kit.run("an artifact directory is one flat name per task") {
             let base = URL(fileURLWithPath: "/tmp/artifacts")
             let directory = TaskAutomation.artifactDirectory(base: base, taskId: "gh:alex/demo#7")

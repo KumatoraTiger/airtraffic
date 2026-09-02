@@ -13,8 +13,12 @@ public actor AutomationRunner {
         /// own business, and picking one of them for the user was guesswork
         /// that got the intermediate output as often as the finished page.
         case produced(String)
-        /// It ran but produced nothing, or could not be started at all.
-        case failed(String)
+        /// It failed: a non-zero exit, a timeout, nothing written, or it
+        /// could not be started at all. `artifactPath` is the output
+        /// directory when the command wrote into it before failing — a
+        /// wrapper that reports WHY it gave up does so as a file there, and
+        /// that report is the one thing the user wants from a failed run.
+        case failed(String, artifactPath: String? = nil)
     }
 
     /// How long one command may hold the queue.
@@ -105,14 +109,17 @@ public actor AutomationRunner {
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: watchdog)
         process.waitUntilExit()
         watchdog.cancel()
-        if timedOut { return .failed("時間切れで打ち切りました") }
+        // Whether anything was written is checked BEFORE the exit code: a
+        // wrapper that fails on purpose still writes its reason to the
+        // output directory, and that reason must stay reachable.
+        let wrote = !files(in: directory).subtracting(before).isEmpty
+        let output = wrote ? directory.path : nil
+        if timedOut { return .failed("時間切れで打ち切りました", artifactPath: output) }
         guard process.terminationStatus == 0 else {
-            return .failed("終了コード \(process.terminationStatus) で終わりました")
+            return .failed(
+                "終了コード \(process.terminationStatus) で終わりました", artifactPath: output)
         }
-
-        guard !files(in: directory).subtracting(before).isEmpty else {
-            return .failed("出力先に何も書かれませんでした")
-        }
+        guard wrote else { return .failed("出力先に何も書かれませんでした") }
         return .produced(directory.path)
     }
 
@@ -141,11 +148,28 @@ public actor AutomationRunner {
         return nil
     }
 
-    private func files(in directory: URL) -> Set<URL> {
+    /// One file as it was at one moment. Comparing these sets before and
+    /// after the run is what says "the command wrote something": a new file
+    /// shows up as a new path, and a file the command overwrote — a wrapper
+    /// writing its `結果.md` for the second review of the same pull request —
+    /// shows up as the same path with a new modification date. Comparing
+    /// paths alone missed the second case and called a rerun "no output".
+    private struct FileStamp: Hashable {
+        var path: String
+        var modified: Date?
+    }
+
+    private func files(in directory: URL) -> Set<FileStamp> {
         let found =
             (try? FileManager.default.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: nil)) ?? []
-        return Set(found)
+                at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return Set(
+            found.map { url in
+                FileStamp(
+                    path: url.path,
+                    modified: try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                        .contentModificationDate)
+            })
     }
 
 }
