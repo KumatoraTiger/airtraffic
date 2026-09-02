@@ -17,9 +17,14 @@ public actor AutomationRunner {
         case failed(String)
     }
 
-    /// Long enough for an agent to read a pull request and write a page, short
-    /// enough that a wedged one frees the queue the same morning.
-    private static let timeout: TimeInterval = 900
+    /// How long one command may hold the queue.
+    ///
+    /// This is not a policy on how long an agent may work — it is what stops a
+    /// wedged run from blocking every later one, since this actor runs them one
+    /// at a time. An hour, because answering a review takes an agent far longer
+    /// than writing a page did: reading the comments, changing the code,
+    /// pushing and replying.
+    private static let timeout: TimeInterval = 3600
 
     /// Where an executable named without a path is looked up. A bundled app
     /// inherits a minimal PATH, so the usual install sites are named here.
