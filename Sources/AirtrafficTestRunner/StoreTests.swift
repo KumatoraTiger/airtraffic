@@ -159,15 +159,24 @@ struct StoreTests {
             expectEqual(try await store.tasks().first?.sessionIds, ["claude:s-1"])
         }
 
-        await TestKit.shared.run("store: an automation event is recorded once and pruned by age") {
+        await TestKit.shared.run("store: a comment run is recorded once and counted for the daily limit") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }
-            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@12", taskId: "gh:alex/demo#7")
-            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@12", taskId: "gh:alex/demo#7")
+            func run(_ id: String, task: String, trigger: AutomationTrigger = .comment) -> AutomationRun {
+                AutomationRun(
+                    id: id, taskId: task, title: "PR #7 ログイン画面を直す",
+                    url: "https://github.com/alex/demo/pull/7", trigger: trigger,
+                    author: trigger == .comment ? "coderabbitai[bot]" : nil, startedAt: Date())
+            }
+            try await store.recordAutomationRun(run("ghc:alex/demo#7@12", task: "gh:alex/demo#7"))
+            try await store.recordAutomationRun(run("ghc:alex/demo#7@12", task: "gh:alex/demo#7"))
             expectEqual(try await store.automationEventIds(), ["ghc:alex/demo#7@12"])
 
-            try await store.recordAutomationEvent(id: "ghc:alex/demo#7@13", taskId: "gh:alex/demo#7")
-            try await store.recordAutomationEvent(id: "ghc:alex/demo#9@14", taskId: "gh:alex/demo#9")
+            try await store.recordAutomationRun(run("ghc:alex/demo#7@13", task: "gh:alex/demo#7"))
+            try await store.recordAutomationRun(run("ghc:alex/demo#9@14", task: "gh:alex/demo#9"))
+            // An arrival run is a run too, but not one the comment limit counts.
+            try await store.recordAutomationRun(
+                run("gha:gh:alex/demo#9@1", task: "gh:alex/demo#9", trigger: .arrival))
             let counts = try await store.automationEventCounts(
                 since: Date().addingTimeInterval(-3600))
             expectEqual(counts["gh:alex/demo#7"], 2)
@@ -176,11 +185,76 @@ struct StoreTests {
                 try await store.automationEventCounts(since: Date().addingTimeInterval(3600))
                     .isEmpty,
                 "nothing inside an empty window")
-
-            try await store.pruneAutomationEvents(olderThan: 30 * 24 * 3600)
             expectEqual(try await store.automationEventIds().count, 3)
-            try await store.pruneAutomationEvents(olderThan: -1)
-            expect(try await store.automationEventIds().isEmpty, "the old event is gone")
+            expectEqual(try await store.automationRuns().count, 4)
+
+            try await store.pruneAutomationRuns(olderThan: 30 * 24 * 3600)
+            expectEqual(try await store.automationRuns().count, 4)
+            try await store.pruneAutomationRuns(olderThan: -1)
+            expect(try await store.automationRuns().isEmpty, "the old runs are gone")
+        }
+
+        await TestKit.shared.run("store: a run keeps its outcome and is read back newest first") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let first = AutomationRun(
+                id: "gha:gh:alex/demo#7@1", taskId: "gh:alex/demo#7", title: "PR #7 直す",
+                url: "https://github.com/alex/demo/pull/7", trigger: .arrival,
+                startedAt: Date(timeIntervalSince1970: 1_000))
+            let second = AutomationRun(
+                id: "ghc:alex/demo#8@20", taskId: "gh:alex/demo#8", title: "PR #8 足す",
+                trigger: .comment, author: "coderabbitai[bot]",
+                startedAt: Date(timeIntervalSince1970: 2_000))
+            try await store.recordAutomationRun(first)
+            try await store.recordAutomationRun(second)
+            try await store.finishAutomationRun(
+                id: first.id, state: .done, artifactPath: "/tmp/out",
+                now: Date(timeIntervalSince1970: 1_500))
+            try await store.finishAutomationRun(
+                id: second.id, state: .failed, reason: "終了コード 1 で終わりました",
+                now: Date(timeIntervalSince1970: 2_500))
+
+            let runs = try await store.automationRuns()
+            expectEqual(runs.map(\.id), [second.id, first.id])
+            let done = try unwrap(runs.last)
+            expectEqual(done.state, .done)
+            expectEqual(done.artifactPath, "/tmp/out")
+            expectEqual(done.finishedAt, Date(timeIntervalSince1970: 1_500))
+            expectEqual(done.url, "https://github.com/alex/demo/pull/7")
+            let failed = try unwrap(runs.first)
+            expectEqual(failed.state, .failed)
+            expectEqual(failed.reason, "終了コード 1 で終わりました")
+            expectEqual(failed.author, "coderabbitai[bot]")
+            expectEqual(failed.trigger, .comment)
+        }
+
+        await TestKit.shared.run("store: runs still running at launch are marked interrupted") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let task = TaskItem(
+                id: "gh:alex/demo#7", title: "PR #7 直す", detail: "", status: .todo, rank: nil,
+                source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [])
+            try await store.upsertTask(task)
+            try await store.setAutomation(taskId: task.id, state: .running)
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "gha:gh:alex/demo#7@1", taskId: task.id, title: task.title,
+                    trigger: .arrival, startedAt: Date()))
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "gha:gh:alex/demo#6@1", taskId: "gh:alex/demo#6", title: "PR #6",
+                    trigger: .arrival, startedAt: Date(), finishedAt: Date(), state: .done))
+
+            try await store.interruptRunningAutomation(now: Date(timeIntervalSince1970: 9_000))
+
+            let runs = try await store.automationRuns()
+            let interrupted = try unwrap(runs.first { $0.taskId == task.id })
+            expectEqual(interrupted.state, .failed)
+            expectEqual(interrupted.reason, Store.interruptedReason)
+            expectEqual(interrupted.finishedAt, Date(timeIntervalSince1970: 9_000))
+            let untouched = try unwrap(runs.first { $0.taskId == "gh:alex/demo#6" })
+            expectEqual(untouched.state, .done)
+            expectEqual(try await store.tasks().first?.automationState, .failed)
         }
 
         await TestKit.shared.run("store: deleteTask removes the row and its links") {

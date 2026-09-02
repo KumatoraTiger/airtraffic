@@ -23,6 +23,11 @@ Constraints of this environment:
 - **No external dependencies** — the package builds with the Apple toolchain alone
   (SQLite via the system `libsqlite3`). Keep it that way unless there is a strong
   reason.
+- **A debug build shares the installed app's data.** `HOME` does not move
+  Application Support, so `.build/debug/Airtraffic` opens the same store and
+  runs the same migrations as the app the user has running. For a UI check,
+  set `AIRTRAFFIC_DATA_DIR=/tmp/somewhere` and pass `-github.enabled 0
+  -automation.enabled 0` so nothing real is synced or launched.
 
 ## Architecture
 

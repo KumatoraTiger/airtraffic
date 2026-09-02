@@ -182,6 +182,10 @@ final class AppModel {
     }
     /// What the last command did, for the settings screen.
     private(set) var automationStatus: String?
+    /// Every run of the per-task command the store remembers, newest first.
+    /// The board's 自動実行 section reads it; refreshed whenever a run starts
+    /// or ends and once at launch.
+    private(set) var automationRuns: [AutomationRun] = []
 
     var automationSettings: AutomationSettings {
         AutomationSettings(
@@ -201,14 +205,14 @@ final class AppModel {
         }
     }
 
-    /// Entries with an execution waiting on the user, among what the live
-    /// sections show. Status never moves a row anymore; this only feeds the
-    /// lane badges and the menu bar.
+    /// Open tasks with an execution waiting on the user. Status never moves a
+    /// row; this only feeds the lane badges and the menu bar. Sessions that
+    /// match no task are not on the board, so they are not counted either.
     var waitingEntries: [BoardEntry] {
         boardEntries.flatMap(\.selfAndChildren).filter { entry in
             guard entry.liveStatus?.needsAttention == true else { return false }
-            if let task = entry.task { return task.status != .done }
-            return entry.isRecent()
+            guard let task = entry.task else { return false }
+            return task.status != .done
         }
     }
     /// Kept as state rather than recomputed: the badge and the menu bar read
@@ -228,12 +232,6 @@ final class AppModel {
     /// are built from, so no caller has to remember to.
     private func rebuildBoard() {
         boardEntries = BoardAssembler.assemble(tasks: tasks, sessions: sessions, labels: labels)
-        refreshWaitingCount()
-    }
-
-    /// Cheap pass over the assembled rows. Also runs on the scan loop, because
-    /// a row can stop being "recent" with nothing else having changed.
-    private func refreshWaitingCount() {
         let count = waitingEntries.count
         if count != waitingCount { waitingCount = count }
     }
@@ -346,7 +344,7 @@ final class AppModel {
         // Assigning an identical array still tells SwiftUI the board changed,
         // and the loop runs every three seconds, so compare before writing.
         let scanned = await coordinator.scan()
-        if scanned != sessions { sessions = scanned } else { refreshWaitingCount() }
+        if scanned != sessions { sessions = scanned }
         if labelingEnabled, Date().timeIntervalSince(lastLabelPass) > 60 {
             lastLabelPass = Date()
             await runLabelPass()
@@ -414,21 +412,38 @@ final class AppModel {
         automationRunning = true
         defer { automationRunning = false }
         for task in planned {
+            let now = Date()
+            let run = AutomationRun(
+                id: AutomationRun.arrivalId(taskId: task.id, now: now), taskId: task.id,
+                title: task.title, url: GitHubTaskSync.url(fromDetail: task.detail),
+                trigger: .arrival, startedAt: now)
+            try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
             let outcome = await automationRunner.run(task: task, settings: settings)
-            let stamp = Date().formatted(date: .omitted, time: .shortened)
-            switch outcome {
-            case .produced(let path):
-                try? await store.setAutomation(
-                    taskId: task.id, state: .done, artifactPath: path)
-                automationStatus = "\(stamp) \(task.title) の生成物ができました"
-            case .failed(let reason):
-                try? await store.setAutomation(taskId: task.id, state: .failed)
-                automationStatus = "\(stamp) \(task.title): \(reason)"
-            }
-            await refreshLists()
+            await finishRun(
+                run, task: task, outcome: outcome, success: "\(task.title) の生成物ができました")
         }
+    }
+
+    /// Writes how a run ended, to the run row and to the task, then tells the
+    /// settings screen in one line.
+    private func finishRun(
+        _ run: AutomationRun, task: TaskItem, outcome: AutomationRunner.Outcome, success: String
+    ) async {
+        guard let store else { return }
+        let stamp = Date().formatted(date: .omitted, time: .shortened)
+        switch outcome {
+        case .produced(let path):
+            try? await store.finishAutomationRun(id: run.id, state: .done, artifactPath: path)
+            try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
+            automationStatus = "\(stamp) \(success)"
+        case .failed(let reason):
+            try? await store.finishAutomationRun(id: run.id, state: .failed, reason: reason)
+            try? await store.setAutomation(taskId: task.id, state: .failed)
+            automationStatus = "\(stamp) \(task.title): \(reason)"
+        }
+        await refreshLists()
     }
 
     // MARK: - Review-comment command
@@ -466,40 +481,39 @@ final class AppModel {
         let byId = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for event in selection.run {
             guard let task = byId[event.taskId] else { continue }
-            try? await store.recordAutomationEvent(id: event.id, taskId: task.id)
+            let run = AutomationRun(
+                id: event.id, taskId: task.id, title: task.title,
+                url: GitHubTaskSync.url(fromDetail: task.detail), trigger: .comment,
+                author: event.author, startedAt: Date())
+            try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
             let outcome = await automationRunner.run(
                 task: task, settings: settings, event: event)
-            let stamp = Date().formatted(date: .omitted, time: .shortened)
-            switch outcome {
-            case .produced(let path):
-                try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
-                automationStatus = "\(stamp) \(event.author) のレビューに対して実行しました"
-            case .failed(let reason):
-                try? await store.setAutomation(taskId: task.id, state: .failed)
-                automationStatus = "\(stamp) \(task.title): \(reason)"
-            }
-            await refreshLists()
+            await finishRun(
+                run, task: task, outcome: outcome,
+                success: "\(event.author) のレビューに対して実行しました")
         }
     }
 
     /// Clears one row's result so the command can run again, for the case
     /// where it failed for a reason the user has since fixed.
-    func resetAutomation(_ task: TaskItem) async {
+    func resetAutomation(taskId: String) async {
         guard let store else { return }
-        await automationRunner.discard(taskId: task.id)
-        try? await store.setAutomation(taskId: task.id, state: nil)
+        await automationRunner.discard(taskId: taskId)
+        try? await store.setAutomation(taskId: taskId, state: nil)
         await refreshLists()
     }
 
     private func refreshFromStore() async {
         guard let store else { return }
         try? await store.pruneLabels(olderThan: 30 * 24 * 3600)
-        try? await store.pruneAutomationEvents(olderThan: 30 * 24 * 3600)
+        try? await store.pruneAutomationRuns(olderThan: 30 * 24 * 3600)
+        // Only this process starts commands, so a run still marked running at
+        // launch is one the previous process never finished writing.
+        try? await store.interruptRunningAutomation()
         labels = (try? await store.labels()) ?? [:]
-        tasks = (try? await store.tasks()) ?? []
-        preferences = (try? await store.preferences()) ?? []
+        await refreshLists()
     }
 
     // MARK: - LLM plumbing
@@ -722,38 +736,6 @@ final class AppModel {
         }
     }
 
-    /// Persists an auto-materialized entry as a task, so it survives its
-    /// sessions going quiet. Also the way an aged-out entry is brought back
-    /// from the 完了 section.
-    func keepEntry(_ entry: BoardEntry) async {
-        await edit("タスクにする") { await performKeepEntry(entry) }
-    }
-
-    private func performKeepEntry(_ entry: BoardEntry) async {
-        guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
-        let task = TaskItem(
-            id: UUID().uuidString, title: entry.title, detail: "",
-            status: entry.isLive ? .inProgress : .todo, rank: nil,
-            source: .deterministic, createdAt: Date(), updatedAt: Date(),
-            sessionIds: entry.sessions.map(\.id))
-        try? await store.upsertTask(task)
-        await refreshLists()
-    }
-
-    /// Ties a taskless entry's sessions to an existing task. The entry's row
-    /// disappears into the task, which shows them as its executions from then
-    /// on — and keeps them until the task itself is done.
-    func linkEntry(_ entry: BoardEntry, to task: TaskItem) async {
-        await edit("タスクへの紐づけ") {
-            guard let store, entry.task == nil, !entry.sessions.isEmpty else { return }
-            var updated = task
-            updated.sessionIds.append(contentsOf: entry.sessions.map(\.id))
-            updated.updatedAt = Date()
-            try? await store.upsertTask(updated)
-            await refreshLists()
-        }
-    }
-
     /// Promote a session's in-transcript todo into a global task. When the
     /// session already hangs under a task, the todo becomes a subtask of it —
     /// which is where a promoted todo belongs.
@@ -900,6 +882,10 @@ final class AppModel {
 
     private func refreshLists() async {
         guard let store else { return }
+        // Runs first: their section sits above the task list, and inserting
+        // it after the tasks are in makes the List keep its offset relative
+        // to the rows below, which reads as a board that opened scrolled.
+        automationRuns = (try? await store.automationRuns()) ?? []
         tasks = (try? await store.tasks()) ?? []
         preferences = (try? await store.preferences()) ?? []
     }

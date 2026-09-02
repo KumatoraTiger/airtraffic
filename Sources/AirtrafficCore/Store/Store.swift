@@ -13,8 +13,7 @@ public actor Store {
     }
 
     public static func defaultPath() -> String {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Airtraffic", isDirectory: true)
+        let base = AppDirectories.support()
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base.appendingPathComponent("airtraffic.sqlite").path
     }
@@ -48,14 +47,7 @@ public actor Store {
         try Self.migrateTaskCompletedAt(db)
         try Self.migrateTaskParentId(db)
         try Self.migrateTaskAutomation(db)
-        try db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS automation_events (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                created_at REAL NOT NULL
-            );
-            """)
+        try Self.migrateAutomationRuns(db)
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -104,6 +96,44 @@ public actor Store {
         let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
         guard !columns.contains("parent_id") else { return }
         try db.execute("ALTER TABLE tasks ADD COLUMN parent_id TEXT")
+    }
+
+    /// Creates the run history behind the board's 自動実行 section, absorbing
+    /// the older `automation_events` table whose rows only said "this comment
+    /// already fired". Those rows become comment runs whose outcome is read
+    /// off the task, since nothing else recorded it at the time.
+    ///
+    /// The old table is left in place, not dropped: an installed build still
+    /// running the old schema shares this file, and losing the table would
+    /// make it forget which reviews it already answered.
+    private static func migrateAutomationRuns(_ db: SQLiteDatabase) throws {
+        try db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS automation_runs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                url TEXT,
+                trigger TEXT NOT NULL,
+                author TEXT,
+                started_at REAL NOT NULL,
+                finished_at REAL,
+                state TEXT NOT NULL,
+                reason TEXT,
+                artifact_path TEXT
+            );
+            """)
+        let tables = try db.query("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .map { $0.text("name") }
+        guard tables.contains("automation_events") else { return }
+        try db.execute(
+            """
+            INSERT OR IGNORE INTO automation_runs
+                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path)
+            SELECT e.id, e.task_id, COALESCE(t.title, ''), NULL, 'comment', NULL, e.created_at,
+                e.created_at, COALESCE(t.automation_state, 'done'), NULL, t.artifact_path
+            FROM automation_events e LEFT JOIN tasks t ON t.id = e.task_id
+            """)
     }
 
     /// Adds the automation columns behind the per-task command. Existing
@@ -212,44 +242,111 @@ public actor Store {
             ])
     }
 
-    // MARK: - Automation events
+    // MARK: - Automation runs
 
-    /// Every event whose command was already started.
+    /// Every comment event whose command was already started.
     ///
     /// The key of an event is the comment that caused it, so this set is what
     /// makes one bot review run the command once and not once per pass.
     public func automationEventIds() throws -> Set<String> {
-        Set(try db.query("SELECT id FROM automation_events").map { $0.text("id") })
+        Set(
+            try db.query("SELECT id FROM automation_runs WHERE trigger = 'comment'")
+                .map { $0.text("id") })
     }
 
-    /// Marks an event as started. Written BEFORE the command runs: a crash
+    /// Records a run as started. Written BEFORE the command runs: a crash
     /// mid-run has to look like "already handled", never like "never ran".
-    public func recordAutomationEvent(id: String, taskId: String, now: Date = Date()) throws {
+    public func recordAutomationRun(_ run: AutomationRun) throws {
         try db.execute(
             """
-            INSERT OR IGNORE INTO automation_events (id, task_id, created_at) VALUES (?, ?, ?)
-            """, [.text(id), .text(taskId), .real(now.timeIntervalSince1970)])
+            INSERT OR IGNORE INTO automation_runs
+                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                .text(run.id), .text(run.taskId), .text(run.title),
+                run.url.map { .text($0) } ?? .null,
+                .text(run.trigger.rawValue),
+                run.author.map { .text($0) } ?? .null,
+                .real(run.startedAt.timeIntervalSince1970),
+                run.finishedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
+                .text(run.state.rawValue),
+                run.reason.map { .text($0) } ?? .null,
+                run.artifactPath.map { .text($0) } ?? .null,
+            ])
     }
 
-    /// How many events each task fired inside the window, for the per-pull-
-    /// request daily limit. Counted from the same rows the dedupe uses, so a
-    /// run that was started and then crashed still counts.
+    /// Records how a run ended.
+    public func finishAutomationRun(
+        id: String, state: AutomationState, reason: String? = nil, artifactPath: String? = nil,
+        now: Date = Date()
+    ) throws {
+        try db.execute(
+            """
+            UPDATE automation_runs SET finished_at = ?, state = ?, reason = ?, artifact_path = ?
+            WHERE id = ?
+            """,
+            [
+                .real(now.timeIntervalSince1970), .text(state.rawValue),
+                reason.map { .text($0) } ?? .null,
+                artifactPath.map { .text($0) } ?? .null,
+                .text(id),
+            ])
+    }
+
+    /// Marks every run still `running` as failed, along with the task rows
+    /// that say the same. Only the app starts these commands and nothing
+    /// survives its exit, so at launch a `running` row can only be a run the
+    /// previous process never got to finish writing.
+    public func interruptRunningAutomation(now: Date = Date()) throws {
+        try db.execute(
+            """
+            UPDATE automation_runs SET finished_at = ?, state = 'failed', reason = ?
+            WHERE state = 'running'
+            """, [.real(now.timeIntervalSince1970), .text(Self.interruptedReason)])
+        try db.execute(
+            "UPDATE tasks SET automation_state = 'failed' WHERE automation_state = 'running'")
+    }
+
+    public static let interruptedReason = "アプリの終了で中断されました"
+
+    /// The most recent runs, newest first.
+    public func automationRuns(limit: Int = 50) throws -> [AutomationRun] {
+        let rows = try db.query(
+            "SELECT * FROM automation_runs ORDER BY started_at DESC LIMIT ?", [.int(Int64(limit))])
+        return rows.map { row in
+            AutomationRun(
+                id: row.text("id"), taskId: row.text("task_id"), title: row.text("title"),
+                url: row.textOrNil("url"),
+                trigger: AutomationTrigger(rawValue: row.text("trigger")) ?? .comment,
+                author: row.textOrNil("author"),
+                startedAt: Date(timeIntervalSince1970: row.real("started_at")),
+                finishedAt: row.realOrNil("finished_at").map(Date.init(timeIntervalSince1970:)),
+                state: AutomationState(rawValue: row.text("state")) ?? .failed,
+                reason: row.textOrNil("reason"),
+                artifactPath: row.textOrNil("artifact_path"))
+        }
+    }
+
+    /// How many comment runs each task fired inside the window, for the
+    /// per-pull-request daily limit. Counted from the same rows the dedupe
+    /// uses, so a run that was started and then crashed still counts.
     public func automationEventCounts(since: Date) throws -> [String: Int] {
         let rows = try db.query(
             """
-            SELECT task_id, COUNT(*) AS runs FROM automation_events
-            WHERE created_at >= ? GROUP BY task_id
+            SELECT task_id, COUNT(*) AS runs FROM automation_runs
+            WHERE trigger = 'comment' AND started_at >= ? GROUP BY task_id
             """, [.real(since.timeIntervalSince1970)])
         var counts: [String: Int] = [:]
         for row in rows { counts[row.text("task_id")] = Int(row.int("runs")) }
         return counts
     }
 
-    /// Housekeeping only: an event this old names a comment no pass will see
-    /// again, since a comment older than a day never fires one.
-    public func pruneAutomationEvents(olderThan age: TimeInterval, now: Date = Date()) throws {
+    /// Housekeeping only: a run this old names a comment no pass will see
+    /// again, and has long left the board.
+    public func pruneAutomationRuns(olderThan age: TimeInterval, now: Date = Date()) throws {
         try db.execute(
-            "DELETE FROM automation_events WHERE created_at < ?",
+            "DELETE FROM automation_runs WHERE started_at < ?",
             [.real(now.timeIntervalSince1970 - age)])
     }
 

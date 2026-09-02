@@ -5,12 +5,16 @@ import SwiftUI
 /// attached. Session status only paints badges on rows; it never moves a row
 /// between sections. Sections, in the order the user should spend attention:
 ///
+/// - 自動実行: the agents the per-task command started on GitHub events —
+///   running now, or finished within the day (`AutomationRunsSection`)
 /// - 今日やる: the tasks the user picked for today's focus; they stay here
 ///   until taken off by hand
 /// - タスク: the priority list itself — every other open task, in rank order,
 ///   with its subtasks and linked sessions hanging under it as a tree
-/// - タスク外の動き: agent activity matching no task, active within 24 hours
-/// - 完了: done tasks (with their sessions) and aged-out activity
+/// - 完了: done tasks, with their sessions
+///
+/// Agent sessions matching no task are not shown: the board is about the
+/// user's tasks, and a session that belongs to none of them is noise here.
 struct BoardView: View {
     @Environment(AppModel.self) private var model
     @State private var newTitle = ""
@@ -18,16 +22,14 @@ struct BoardView: View {
 
     var body: some View {
         List {
-            if model.boardEntries.isEmpty {
+            if model.tasks.isEmpty && model.automationRuns.isEmpty {
                 ContentUnavailableView(
-                    "まだ何も映っていません",
+                    "まだタスクがありません",
                     systemImage: "airplane.departure",
-                    description: Text("coding agent のセッションが動き出すと、ここに映ります"))
+                    description: Text("下の欄で追加するか、設定で GitHub 連携をオンにすると並びます"))
             }
+            AutomationRunsSection()
             todayAndTaskSection
-            entrySection(
-                activity, title: "タスク外の動き", symbol: "antenna.radiowaves.left.and.right",
-                color: .gray)
             doneSection
         }
     }
@@ -53,20 +55,6 @@ struct BoardView: View {
         }
     }
 
-    /// Agent activity matching no task, active within the last 24 hours,
-    /// newest first. Rows here can be promoted to a task or linked to one.
-    private var activity: [BoardEntry] {
-        model.boardEntries
-            .filter { $0.task == nil && $0.isRecent() }
-            .sorted { ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast) }
-    }
-
-    /// Taskless activity that aged past the 24-hour window: treated as
-    /// finished, still revertable via 「タスクにする」.
-    private var agedOut: [BoardEntry] {
-        model.boardEntries.filter { $0.task == nil && !$0.isRecent() }
-    }
-
     /// Done tasks, newest completion first. Their linked sessions stay
     /// attached, so completing a task takes its whole tree along.
     private var doneEntries: [BoardEntry] {
@@ -78,22 +66,6 @@ struct BoardView: View {
     }
 
     // MARK: - Sections
-
-    @ViewBuilder
-    private func entrySection(
-        _ entries: [BoardEntry], title: String, symbol: String, color: Color
-    ) -> some View {
-        if !entries.isEmpty {
-            Section {
-                ForEach(entries) { entry in
-                    EntryRow(entry: entry)
-                }
-            } header: {
-                Label("\(title) (\(entries.count))", systemImage: symbol)
-                    .foregroundStyle(color)
-            }
-        }
-    }
 
     /// 今日やる and タスク as one continuous, reorderable list. macOS's List
     /// starts row drags only through onMove, and an onMove drag cannot leave
@@ -149,24 +121,21 @@ struct BoardView: View {
         .padding(.top, 6)
     }
 
-    /// Finished work, brought back with one click: done tasks (their sessions
-    /// still attached) via the checkmark, aged-out activity via 「タスクにする」.
+    /// Finished work, brought back with one click on the checkmark: done
+    /// tasks, their sessions still attached.
     @ViewBuilder
     private var doneSection: some View {
-        let count = doneEntries.count + agedOut.count
-        if count > 0 {
+        if !doneEntries.isEmpty {
             Section {
                 if showDone {
                     ForEach(doneEntries) { entry in
                         EntryRow(entry: entry)
                     }
-                    ForEach(agedOut) { entry in
-                        EntryRow(entry: entry)
-                    }
                 }
             } header: {
                 collapsibleHeader(
-                    "完了 (\(count))", symbol: "checkmark.circle", expanded: $showDone)
+                    "完了 (\(doneEntries.count))", symbol: "checkmark.circle",
+                    expanded: $showDone)
             }
         }
     }

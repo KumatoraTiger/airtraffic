@@ -40,8 +40,7 @@ public actor AutomationRunner {
     }
 
     public static func defaultBase() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Airtraffic/artifacts", isDirectory: true)
+        AppDirectories.support().appendingPathComponent("artifacts", isDirectory: true)
     }
 
     /// Runs the command for one task. Never throws: every failure is an

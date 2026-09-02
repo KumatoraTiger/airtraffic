@@ -6,10 +6,9 @@ import SwiftUI
 /// its done-toggle like any task list; execution state (agents, status) is
 /// trailing decoration that appears only while something is actually running.
 /// Its linked sessions hang under it as a tree, newest first, three at most —
-/// and stay there until the task itself is done. Auto-materialized entries
-/// lead with their status symbol and carry 「タスクにする」 (promote to a task) and
-/// 「紐づけ」 (attach to an existing task). Tapping expands the detail and
-/// the attached executions, whose todos can be promoted into persistent tasks.
+/// and stay there until the task itself is done. Tapping expands the detail
+/// and the attached executions, whose todos can be promoted into persistent
+/// tasks. Every row here has a task: sessions matching no task are not shown.
 /// Subtasks hang one level under the task, each a task in its own right; the
 /// parent row shows their progress as 「2/5」 and never completes on its own.
 struct EntryRow: View {
@@ -31,10 +30,6 @@ struct EntryRow: View {
                             }
                         }
                         .help("完了にする")
-                } else {
-                    Image(systemName: statusSymbol(entry.liveStatus ?? .idle))
-                        .font(.caption)
-                        .foregroundStyle(statusColor(entry.liveStatus ?? .idle))
                 }
                 if let label = entry.label, !label.isPlaceholder {
                     Text(label.kind.displayName)
@@ -89,31 +84,10 @@ struct EntryRow: View {
                     }
                     sourceBadge(task)
                     automationBadge(task)
-                } else {
-                    InstantButton(
-                        title: "タスクにする",
-                        help: "タスクにする（セッションが終わっても消えなくなります）"
-                    ) {
-                        Task { await model.keepEntry(entry) }
-                    }
-                    linkMenu
                 }
             }
-            if entry.task != nil {
-                sessionTree
-                subtaskTree
-            } else if let nowDoing {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Text(nowDoing)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(expanded ? 8 : 1)
-                }
-                .padding(.leading, 2)
-            }
+            sessionTree
+            subtaskTree
             if expanded {
                 if let detail = entry.task?.detail, !detail.isEmpty {
                     Text(detail)
@@ -269,31 +243,6 @@ struct EntryRow: View {
         return title.isEmpty ? session.agent.displayName : title
     }
 
-    /// Attaches this taskless entry to an existing open task.
-    private var linkMenu: some View {
-        InstantMenuButton(
-            title: "紐づけ",
-            help: "既存のタスクに紐づける（タスクの下にぶら下がります）",
-            enabled: !openTasks.isEmpty
-        ) {
-            openTasks.map { task in
-                InstantMenuButton.Item(title: linkLabel(task)) {
-                    Task { await model.linkEntry(entry, to: task) }
-                }
-            }
-        }
-    }
-
-    private var openTasks: [TaskItem] {
-        model.tasks.filter { $0.status != .done && $0.status != .archived }
-    }
-
-    /// Subtasks read as children in the 紐づけ menu too, so linking a session
-    /// to the right level is one glance.
-    private func linkLabel(_ task: TaskItem) -> String {
-        task.isSubtask ? "↳ \(task.title)" : task.title
-    }
-
     private var agents: [AgentKind] {
         var seen: [AgentKind] = []
         for session in entry.sessions where !seen.contains(session.agent) {
@@ -389,7 +338,7 @@ struct EntryRow: View {
                 Image(systemName: "folder")
                     .font(.caption2)
                     .foregroundStyle(.green)
-                    .instantClick("生成物のフォルダを開く") { reveal(path) }
+                    .instantClick("生成物のフォルダを開く") { revealArtifact(path) }
                     .help("生成物のフォルダを開く")
             }
         case .failed:
@@ -402,36 +351,6 @@ struct EntryRow: View {
         }
     }
 
-    /// Opens the Finder on what the command wrote, with the newest page
-    /// selected. A path left by an earlier build names one file, which the
-    /// same call reveals just as well.
-    private func reveal(_ path: String) {
-        let url = URL(fileURLWithPath: path)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return }
-        guard isDirectory.boolValue else {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-            return
-        }
-        let contents =
-            (try? FileManager.default.contentsOfDirectory(
-                at: url, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let pages = contents.filter { $0.pathExtension.lowercased() == "html" }
-        let newest = (pages.isEmpty ? contents : pages).max { left, right in
-            modified(left) < modified(right)
-        }
-        if let newest {
-            NSWorkspace.shared.activateFileViewerSelecting([newest])
-        } else {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    private func modified(_ url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-            ?? .distantPast
-    }
-
     /// The issue or pull request link the sync wrote into the detail line.
     private func githubURL(_ task: TaskItem) -> URL? {
         task.detail
@@ -439,21 +358,6 @@ struct EntryRow: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { $0.hasPrefix("https://") }
             .flatMap(URL.init(string:))
-    }
-
-    /// One line for what the most urgent execution is on right now: its
-    /// in-progress todo when there is one, else the assistant's latest
-    /// message. Marker-only messages from imported transcripts say nothing
-    /// about the work, so they are dropped. Stopped executions say nothing
-    /// about *now*, so the line is live-only.
-    private var nowDoing: String? {
-        guard entry.isLive, let session = entry.sessions.first else { return nil }
-        if let doing = session.todos.first(where: { $0.status == .inProgress }) {
-            return doing.content
-        }
-        let text = session.lastAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !(text.hasPrefix("<") && text.hasSuffix(">")) else { return nil }
-        return text
     }
 
     private func statusBadge(_ status: SessionStatus) -> some View {
