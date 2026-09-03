@@ -25,10 +25,17 @@ public actor AutomationRunner {
     ///
     /// This is not a policy on how long an agent may work — it is what stops a
     /// wedged run from blocking every later one, since this actor runs them one
-    /// at a time. An hour, because answering a review takes an agent far longer
-    /// than writing a page did: reading the comments, changing the code,
-    /// pushing and replying.
-    private static let timeout: TimeInterval = 3600
+    /// at a time.
+    ///
+    /// Three hours, set by the longest job of the three triggers: implementing
+    /// a labelled issue means reading it, writing the code, getting the tests
+    /// green, then pushing and opening a pull request. An hour was enough for
+    /// explaining a pull request and for answering a review, and too short for
+    /// that. The cost of the larger number is that one wedged run can hold the
+    /// queue for an afternoon; the cost of a smaller one is a run reported as
+    /// 時間切れ while its agent is still working, which is the more misleading
+    /// of the two.
+    private static let timeout: TimeInterval = 3 * 3600
 
     /// Where an executable named without a path is looked up. A bundled app
     /// inherits a minimal PATH, so the usual install sites are named here.
