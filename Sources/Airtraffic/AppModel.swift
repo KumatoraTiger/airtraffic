@@ -264,10 +264,12 @@ final class AppModel {
     private let gitLog = GitLog()
     private let githubInbox = GitHubInbox()
     private let automationRunner = AutomationRunner(base: AutomationRunner.defaultBase())
+    private let artifactPruner = ArtifactPruner(base: AutomationRunner.defaultBase())
     private var scanTask: Task<Void, Never>?
     private var pomodoroTickTask: Task<Void, Never>?
     private var lastLabelPass = Date.distantPast
     private var lastGitHubPass = Date.distantPast
+    private var lastHousekeeping = Date.distantPast
     private var githubPassRunning = false
     private var automationRunning = false
     /// The labels of the open issues the last GitHub pass read, by task id.
@@ -382,6 +384,9 @@ final class AppModel {
         if githubEnabled, Date().timeIntervalSince(lastGitHubPass) > Self.githubInterval {
             await runGitHubPass()
         }
+        if Date().timeIntervalSince(lastHousekeeping) > Self.housekeepingInterval {
+            await runHousekeeping()
+        }
     }
 
     // MARK: - GitHub
@@ -473,7 +478,8 @@ final class AppModel {
                 id: AutomationRun.startId(trigger: trigger, taskId: task.id, now: now),
                 taskId: task.id, title: task.title,
                 url: GitHubTaskSync.url(fromDetail: task.detail), trigger: trigger,
-                startedAt: now)
+                startedAt: now,
+                relation: GitHubTaskSync.relation(fromDetail: task.detail))
             try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
@@ -549,7 +555,8 @@ final class AppModel {
             let run = AutomationRun(
                 id: event.id, taskId: task.id, title: task.title,
                 url: GitHubTaskSync.url(fromDetail: task.detail), trigger: .comment,
-                author: event.author, startedAt: Date())
+                author: event.author, startedAt: Date(),
+                relation: GitHubTaskSync.relation(fromDetail: task.detail))
             try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
@@ -572,12 +579,38 @@ final class AppModel {
 
     private func refreshFromStore() async {
         guard let store else { return }
-        try? await store.pruneLabels(olderThan: 30 * 24 * 3600)
-        try? await store.pruneAutomationRuns(olderThan: 30 * 24 * 3600)
+        await runHousekeeping()
         // Only this process starts commands, so a run still marked running at
         // launch is one the previous process never finished writing.
         try? await store.interruptRunningAutomation()
         labels = (try? await store.labels()) ?? [:]
+        await refreshLists()
+    }
+
+    // MARK: - Housekeeping
+
+    /// How often the aged-out rows and files are swept. Not once per launch:
+    /// this app is left running for weeks at a time, so a launch-only sweep is
+    /// a sweep that mostly never happens.
+    private static let housekeepingInterval: TimeInterval = 6 * 3600
+
+    /// Throws away what has aged out: work labels, run history, and the files
+    /// the per-task commands wrote.
+    ///
+    /// One retention window for all three (`ArtifactPruner.retention`, 30
+    /// days), so a run's row and its output disappear together rather than
+    /// leaving the board pointing at files that are gone, or files nothing on
+    /// the board explains. Whatever the pruner did delete is cleared off the
+    /// rows that still name it, since a folder button that opens nothing is
+    /// worse than no button.
+    private func runHousekeeping() async {
+        guard let store else { return }
+        lastHousekeeping = Date()
+        try? await store.pruneLabels(olderThan: ArtifactPruner.retention)
+        try? await store.pruneAutomationRuns(olderThan: ArtifactPruner.retention)
+        let removed = await artifactPruner.prune()
+        guard !removed.isEmpty else { return }
+        try? await store.clearArtifactPaths(removed)
         await refreshLists()
     }
 

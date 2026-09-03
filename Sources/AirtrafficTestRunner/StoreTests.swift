@@ -228,6 +228,51 @@ struct StoreTests {
             expectEqual(failed.trigger, .comment)
         }
 
+        await TestKit.shared.run("store: a run remembers the kind of row it fired on") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "gha:gh:alex/demo#7@1", taskId: "gh:alex/demo#7", title: "レビュー: PR #7 直す",
+                    trigger: .arrival, startedAt: Date(timeIntervalSince1970: 2_000),
+                    relation: .reviewRequested))
+            // A row from a build that had no relation column reads back nil,
+            // which is what makes the badge fall back to the trigger's name.
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "gha:gh:alex/demo#8@1", taskId: "gh:alex/demo#8", title: "PR #8 足す",
+                    trigger: .arrival, startedAt: Date(timeIntervalSince1970: 1_000)))
+
+            let runs = try await store.automationRuns()
+            expectEqual(runs.first?.relation, .reviewRequested)
+            expectEqual(runs.first?.triggerLabel, "レビュー依頼")
+            expectEqual(runs.last?.relation, nil)
+            expectEqual(runs.last?.triggerLabel, "新着")
+        }
+
+        await TestKit.shared.run("store: a pruned output directory is cleared off the rows") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let task = TaskItem(
+                id: "gh:alex/demo#7", title: "PR #7 直す", detail: "", status: .todo, rank: nil,
+                source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [])
+            try await store.upsertTask(task)
+            try await store.setAutomation(
+                taskId: task.id, state: .done, artifactPath: "/tmp/out/7")
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "gha:gh:alex/demo#7@1", taskId: task.id, title: task.title,
+                    trigger: .arrival, startedAt: Date(), artifactPath: "/tmp/out/7"))
+
+            try await store.clearArtifactPaths(["/tmp/out/7"])
+            let stored = try unwrap(try await store.tasks().first)
+            expectEqual(stored.artifactPath, nil)
+            // The outcome survives: a run that succeeded a month ago still
+            // succeeded, it just has nothing left to open.
+            expectEqual(stored.automationState, .done)
+            expectEqual(try await store.automationRuns().first?.artifactPath, nil)
+        }
+
         await TestKit.shared.run("store: runs still running at launch are marked interrupted") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

@@ -9,6 +9,10 @@ public enum AutomationTrigger: String, Codable, Sendable {
     /// A label the user put on an issue assigned to them.
     case label
 
+    /// What the board says fired the run, when the row's own kind is not
+    /// known. An arrival run normally shows the KIND of row instead — see
+    /// `AutomationRun.triggerLabel` — because "新着" only says when it
+    /// started, which is the one thing the section's timestamps already say.
     public var displayName: String {
         switch self {
         case .arrival: "新着"
@@ -50,12 +54,16 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
     public var reason: String?
     /// The directory it wrote into, once it produced something.
     public var artifactPath: String?
+    /// What kind of GitHub row it fired on, copied at start time like the
+    /// title. Nil for a run an older build wrote, or one whose task carried no
+    /// readable detail line.
+    public var relation: GitHubRelation?
 
     public init(
         id: String, taskId: String, title: String, url: String? = nil,
         trigger: AutomationTrigger, author: String? = nil, startedAt: Date,
         finishedAt: Date? = nil, state: AutomationState = .running, reason: String? = nil,
-        artifactPath: String? = nil
+        artifactPath: String? = nil, relation: GitHubRelation? = nil
     ) {
         self.id = id
         self.taskId = taskId
@@ -68,6 +76,25 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
         self.state = state
         self.reason = reason
         self.artifactPath = artifactPath
+        self.relation = relation
+    }
+
+    /// What the board's badge says about this run.
+    ///
+    /// An arrival run names the KIND of row it fired on — 「レビュー依頼」,
+    /// 「自分の PR」, 「担当 issue」 — not the fact that the row was new.
+    /// The old 「新着」 was true of every arrival run whatever it fired on, so
+    /// a review request and the user's own pull request read identically, and
+    /// the row's timestamps already answer "when".
+    ///
+    /// The other two triggers keep their own name: for a label the trigger IS
+    /// the news (the relation is always 担当 issue), and for a comment the
+    /// bot's login is what the caller puts in front of 「のレビュー」.
+    public var triggerLabel: String {
+        switch trigger {
+        case .arrival: relation?.displayName ?? trigger.displayName
+        case .comment, .label: trigger.displayName
+        }
     }
 
     /// The id of a run whose trigger is the row itself — an arrival or a

@@ -94,6 +94,12 @@ working directory, each with a command line of its own:
   limit per pull request so a bot and an agent cannot push each other back and
   forth forever. It adds `{commentUrl}` and `{author}` to the substitutions.
 
+The 自動実行 section lists the runs still going and those that finished in the
+last day. Everything older is housekeeping: a run's history row and the files
+it wrote are both kept for 30 days and then deleted together, so the output
+directory does not grow for the life of the install. A row whose files have
+aged out keeps its outcome and loses its folder button.
+
 Two things to know before turning it on:
 
 - **The command line is never handed to a shell.** Arguments are split with

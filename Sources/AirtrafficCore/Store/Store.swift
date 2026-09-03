@@ -120,9 +120,17 @@ public actor Store {
                 finished_at REAL,
                 state TEXT NOT NULL,
                 reason TEXT,
-                artifact_path TEXT
+                artifact_path TEXT,
+                relation TEXT
             );
             """)
+        // The kind of GitHub row a run fired on, so the board's badge can name
+        // it. Rows written before this column answer nil, which reads as "an
+        // older build did not record it" and falls back to the trigger's name.
+        let columns = try db.query("PRAGMA table_info(automation_runs)").map { $0.text("name") }
+        if !columns.contains("relation") {
+            try db.execute("ALTER TABLE automation_runs ADD COLUMN relation TEXT")
+        }
         let tables = try db.query("SELECT name FROM sqlite_master WHERE type = 'table'")
             .map { $0.text("name") }
         guard tables.contains("automation_events") else { return }
@@ -260,8 +268,8 @@ public actor Store {
         try db.execute(
             """
             INSERT OR IGNORE INTO automation_runs
-                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path, relation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 .text(run.id), .text(run.taskId), .text(run.title),
@@ -273,6 +281,7 @@ public actor Store {
                 .text(run.state.rawValue),
                 run.reason.map { .text($0) } ?? .null,
                 run.artifactPath.map { .text($0) } ?? .null,
+                run.relation.map { .text($0.rawValue) } ?? .null,
             ])
     }
 
@@ -324,7 +333,8 @@ public actor Store {
                 finishedAt: row.realOrNil("finished_at").map(Date.init(timeIntervalSince1970:)),
                 state: AutomationState(rawValue: row.text("state")) ?? .failed,
                 reason: row.textOrNil("reason"),
-                artifactPath: row.textOrNil("artifact_path"))
+                artifactPath: row.textOrNil("artifact_path"),
+                relation: row.textOrNil("relation").flatMap(GitHubRelation.init(rawValue:)))
         }
     }
 
@@ -348,6 +358,22 @@ public actor Store {
         try db.execute(
             "DELETE FROM automation_runs WHERE started_at < ?",
             [.real(now.timeIntervalSince1970 - age)])
+    }
+
+    /// Forgets output directories `ArtifactPruner` has deleted, so no row goes
+    /// on offering a folder button that opens nothing.
+    ///
+    /// The one place besides `setAutomation` that writes a task's automation
+    /// columns, and deliberately narrow: it clears the path and leaves the
+    /// state alone, because a run that succeeded a month ago still succeeded.
+    public func clearArtifactPaths(_ paths: [String]) throws {
+        for path in paths {
+            try db.execute(
+                "UPDATE tasks SET artifact_path = NULL WHERE artifact_path = ?", [.text(path)])
+            try db.execute(
+                "UPDATE automation_runs SET artifact_path = NULL WHERE artifact_path = ?",
+                [.text(path)])
+        }
     }
 
     /// Writes a task back exactly as it was, links included. Unlike

@@ -73,7 +73,11 @@ struct AutomationRunRow: View {
                         .help("GitHub で開く")
                 }
                 Spacer()
+                // Fixed for the same reason as the badge: left to compress,
+                // a finish time breaks into a column of single characters and
+                // drags the whole row's height with it.
                 timing
+                    .fixedSize()
                 // Shown for a failed run too: a wrapper that gives up writes
                 // its reason there, and that report is what the user wants.
                 if let path = run.artifactPath {
@@ -129,16 +133,16 @@ struct AutomationRunRow: View {
         }
     }
 
-    /// What fired the command: a new row, a label the user put on an issue,
-    /// or the named bot's review. The `[bot]` suffix goes, since every login
-    /// here has it, and a long login is shortened so it cannot push the title
-    /// off the row.
+    /// What this run is about: the kind of row that arrived, a label the user
+    /// put on an issue, or the named bot's review. The `[bot]` suffix goes,
+    /// since every login here has it, and a long login is shortened so it
+    /// cannot push the title off the row.
     private var triggerBadge: some View {
-        let text =
-            switch run.trigger {
-            case .comment: run.author.map { "\(Self.botName($0)) のレビュー" } ?? run.trigger.displayName
-            case .arrival, .label: run.trigger.displayName
-            }
+        // An author is set for a comment run and nothing else, so it alone
+        // decides whether the bot names the badge. Everything else — including
+        // a comment run whose author went unread — is `triggerLabel`'s to
+        // answer, so the enum is switched over in one place, in the model.
+        let text = run.author.map { "\(Self.botName($0)) のレビュー" } ?? run.triggerLabel
         let color: Color =
             switch run.trigger {
             case .arrival: .blue
@@ -148,6 +152,12 @@ struct AutomationRunRow: View {
         return Text(text)
             .font(.caption2.bold())
             .lineLimit(1)
+            // Never compressed. The title next to it asks for far more width
+            // than the row has and holds the higher layout priority, so
+            // without this the badge is the part that gives — and it gave
+            // hardest on the longest titles, which is why issue rows were
+            // showing an empty capsule where the badge should be.
+            .fixedSize()
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(color.opacity(0.15), in: Capsule())
@@ -155,10 +165,13 @@ struct AutomationRunRow: View {
             .help(badgeHelp)
     }
 
-    /// What the badge says when the pointer rests on it.
+    /// What the badge says when the pointer rests on it. The badge itself
+    /// names the kind of row for an arrival; the tooltip is where "because it
+    /// was new" still gets said.
     private var badgeHelp: String {
         switch run.trigger {
-        case .arrival: "新しく届いた行で起動"
+        case .arrival:
+            run.relation.map { "\($0.displayName)が新しく届いて起動" } ?? "新しく届いた行で起動"
         case .comment: run.author.map { "\($0) のレビューコメントで起動" } ?? "レビューコメントで起動"
         case .label: "issue に付いたラベルで起動"
         }

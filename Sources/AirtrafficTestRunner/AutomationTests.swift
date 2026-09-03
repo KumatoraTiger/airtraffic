@@ -509,6 +509,77 @@ struct AutomationTests {
                 "the label command's output is there")
         }
 
+        await kit.run("an arrival run's badge names the kind of row, not its newness") {
+            let review = AutomationRun(
+                id: "gha:1", taskId: "gh:alex/demo#7", title: "レビュー: PR #7 ログイン画面を直す",
+                trigger: .arrival, startedAt: Date(), relation: .reviewRequested)
+            let own = AutomationRun(
+                id: "gha:2", taskId: "gh:alex/demo#8", title: "PR #8 転送を速くする",
+                trigger: .arrival, startedAt: Date(), relation: .authored)
+            expectEqual(review.triggerLabel, "レビュー依頼")
+            expectEqual(own.triggerLabel, "自分の PR")
+            // A row an older build wrote has no relation, and 「新着」 is still
+            // true of it.
+            expectEqual(
+                AutomationRun(
+                    id: "gha:3", taskId: "gh:alex/demo#9", title: "PR #9", trigger: .arrival,
+                    startedAt: Date()
+                ).triggerLabel, "新着")
+        }
+
+        await kit.run("the label and comment triggers keep their own badge") {
+            let labelled = AutomationRun(
+                id: "ghl:1", taskId: "gh:alex/demo#7", title: "issue #7 転送を速くする",
+                trigger: .label, startedAt: Date(), relation: .assigned)
+            let commented = AutomationRun(
+                id: "ghc:1", taskId: "gh:alex/demo#8", title: "PR #8 転送を速くする",
+                trigger: .comment, author: "coderabbitai[bot]", startedAt: Date(),
+                relation: .authored)
+            // The relation is always 担当 issue for a label and 自分の PR for a
+            // comment, so naming it would say nothing the trigger does not.
+            expectEqual(labelled.triggerLabel, "ラベル")
+            expectEqual(commented.triggerLabel, "Bot レビュー")
+        }
+
+        await kit.run("an artifact directory ages out once nothing in it is recent") {
+            let now = Date()
+            let expired = ArtifactPruner.expired(
+                [
+                    .init(path: "/tmp/a", lastWrite: now.addingTimeInterval(-31 * 24 * 3600)),
+                    .init(path: "/tmp/b", lastWrite: now.addingTimeInterval(-29 * 24 * 3600)),
+                    .init(path: "/tmp/c", lastWrite: now),
+                ], now: now)
+            expectEqual(expired, ["/tmp/a"])
+        }
+
+        await kit.run("pruning deletes the aged directory and reports its path") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-prune-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            // The old run's page sits in a SUBDIRECTORY: a directory is dated
+            // by the newest file anywhere inside it, never by its own stamp.
+            let old = base.appendingPathComponent("gh_alex_demo_7/eli5", isDirectory: true)
+            let fresh = base.appendingPathComponent("gh_alex_demo_8", isDirectory: true)
+            try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+            let page = old.appendingPathComponent("index.html")
+            try "old".write(to: page, atomically: true, encoding: .utf8)
+            try "new".write(
+                to: fresh.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-40 * 24 * 3600)],
+                ofItemAtPath: page.path)
+
+            let removed = await ArtifactPruner(base: base).prune()
+            expectEqual(removed, [base.appendingPathComponent("gh_alex_demo_7").path])
+            expect(
+                !FileManager.default.fileExists(atPath: old.deletingLastPathComponent().path),
+                "the aged directory is gone")
+            expect(
+                FileManager.default.fileExists(atPath: fresh.path),
+                "the directory written to today stays")
+        }
+
         await kit.run("an artifact directory is one flat name per task") {
             let base = URL(fileURLWithPath: "/tmp/artifacts")
             let directory = TaskAutomation.artifactDirectory(base: base, taskId: "gh:alex/demo#7")
