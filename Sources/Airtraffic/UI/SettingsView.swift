@@ -248,6 +248,21 @@ struct AutomationSection: View {
                         }))
             }
             Divider()
+            Toggle("担当 issue にラベルが付いたら実行する", isOn: $model.automationLabelTrigger)
+            TextField("実行のきっかけにするラベル名", text: $model.automationLabel)
+                .textFieldStyle(.roundedBorder)
+            TextField("ラベル用のコマンド", text: $model.automationLabelCommand)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+            Text(
+                "対象は自分が担当している open な issue だけです。上の置換がそのまま使えます。"
+                    + "同じ issue で二度は動きません。もう一度動かしたいときは、"
+                    + "ボードの自動実行の行を右クリックして「もう一度動けるようにする」を選んでください。"
+                    + "ラベルを外しても、動き出したコマンドは止まりません。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Divider()
             Toggle("自分の PR に bot がレビューコメントを付けたら実行する", isOn: $model.automationCommentTrigger)
             TextField("レビューコメント用のコマンド", text: $model.automationCommentCommand)
                 .textFieldStyle(.roundedBorder)

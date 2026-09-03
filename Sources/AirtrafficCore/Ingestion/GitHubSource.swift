@@ -42,10 +42,15 @@ public struct GitHubItem: Hashable, Sendable {
     public var isPullRequest: Bool
     public var isDraft: Bool
     public var updatedAt: Date
+    /// The labels GitHub carries on the item, by name. Only asked for on the
+    /// assigned-issue search, which is the only place a label decides
+    /// anything ([[LabelTrigger]]); the other searches leave it empty.
+    public var labels: [String]
 
     public init(
         repo: String, number: Int, title: String, url: String, relation: GitHubRelation,
-        isPullRequest: Bool, isDraft: Bool = false, updatedAt: Date = Date()
+        isPullRequest: Bool, isDraft: Bool = false, updatedAt: Date = Date(),
+        labels: [String] = []
     ) {
         self.repo = repo
         self.number = number
@@ -55,6 +60,7 @@ public struct GitHubItem: Hashable, Sendable {
         self.isPullRequest = isPullRequest
         self.isDraft = isDraft
         self.updatedAt = updatedAt
+        self.labels = labels
     }
 
     /// The task id this item always maps to, so a re-scan updates the row it
@@ -179,7 +185,7 @@ public struct GitHubSource: Sendable {
             // whole query.
             let fields =
                 relation == .assigned
-                ? "repository,number,title,url,updatedAt,isPullRequest"
+                ? "repository,number,title,url,updatedAt,isPullRequest,labels"
                 : "repository,number,title,url,updatedAt,isPullRequest,isDraft"
             guard let output = run(arguments + ["--json", fields]) else { return nil }
             guard let rows = decodeSearch(output) else { return nil }
@@ -236,6 +242,7 @@ public struct GitHubSource: Sendable {
 
     private struct SearchRow: Decodable {
         struct Repository: Decodable { let nameWithOwner: String }
+        struct Label: Decodable { let name: String? }
         let repository: Repository
         let number: Int
         let title: String
@@ -243,6 +250,7 @@ public struct GitHubSource: Sendable {
         let updatedAt: String?
         let isPullRequest: Bool?
         let isDraft: Bool?
+        let labels: [Label]?
 
         func item(relation: GitHubRelation) -> GitHubItem {
             GitHubItem(
@@ -253,7 +261,8 @@ public struct GitHubSource: Sendable {
                 relation: relation,
                 isPullRequest: isPullRequest ?? (relation != .assigned),
                 isDraft: isDraft ?? false,
-                updatedAt: updatedAt.flatMap(GitHubSource.parseDate) ?? Date())
+                updatedAt: updatedAt.flatMap(GitHubSource.parseDate) ?? Date(),
+                labels: (labels ?? []).compactMap(\.name))
         }
     }
 

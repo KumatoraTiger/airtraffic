@@ -16,11 +16,21 @@ public actor GitHubInbox {
         /// False when `gh` is missing, logged out, or failing. Nothing was
         /// written and nothing should be concluded from the empty result.
         public var available: Bool
+        /// The labels of each open ISSUE this pass read, by task id. Pull
+        /// requests are left out: the label trigger only ever fires on an
+        /// issue, and a map that also answered for pull requests would let it
+        /// start on one. A task absent from the map is a task whose labels
+        /// this pass knows nothing about ([[LabelTrigger.plan]]).
+        public var labels: [String: [String]]
 
-        public init(upserts: [TaskItem] = [], repos: [String] = [], available: Bool = true) {
+        public init(
+            upserts: [TaskItem] = [], repos: [String] = [], available: Bool = true,
+            labels: [String: [String]] = [:]
+        ) {
             self.upserts = upserts
             self.repos = repos
             self.available = available
+            self.labels = labels
         }
     }
 
@@ -61,7 +71,11 @@ public actor GitHubInbox {
         }
 
         let repos = Array(Set(items.map(\.repo))).sorted()
-        return Result(upserts: upserts, repos: repos, available: true)
+        var labels: [String: [String]] = [:]
+        for item in items where !item.isPullRequest {
+            labels[item.taskId] = item.labels
+        }
+        return Result(upserts: upserts, repos: repos, available: true, labels: labels)
     }
 
     /// Asks GitHub what a bot has said on each candidate pull request, and

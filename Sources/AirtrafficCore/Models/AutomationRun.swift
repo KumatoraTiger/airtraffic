@@ -6,11 +6,24 @@ public enum AutomationTrigger: String, Codable, Sendable {
     case arrival
     /// A bot's review comment on a pull request the user opened.
     case comment
+    /// A label the user put on an issue assigned to them.
+    case label
 
     public var displayName: String {
         switch self {
         case .arrival: "新着"
         case .comment: "Bot レビュー"
+        case .label: "ラベル"
+        }
+    }
+
+    /// How a run of this trigger is named in the store, so the three kinds
+    /// never collide on one task.
+    var idPrefix: String {
+        switch self {
+        case .arrival: "gha"
+        case .comment: "ghc"
+        case .label: "ghl"
         }
     }
 }
@@ -57,11 +70,13 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
         self.artifactPath = artifactPath
     }
 
-    /// The id of an arrival run. A task runs at most once until it is reset,
-    /// and the timestamp keeps a reset-and-rerun from colliding with the
-    /// first run's row.
-    public static func arrivalId(taskId: String, now: Date) -> String {
-        "gha:\(taskId)@\(Int(now.timeIntervalSince1970 * 1000))"
+    /// The id of a run whose trigger is the row itself — an arrival or a
+    /// label. The task runs at most once until it is reset, and the timestamp
+    /// keeps a reset-and-rerun from colliding with the first run's row. A
+    /// comment run carries its event's id instead, which is what makes one
+    /// review fire once.
+    public static func startId(trigger: AutomationTrigger, taskId: String, now: Date) -> String {
+        "\(trigger.idPrefix):\(taskId)@\(Int(now.timeIntervalSince1970 * 1000))"
     }
 
     /// How long a finished run stays on the board.

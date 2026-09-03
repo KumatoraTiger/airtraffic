@@ -40,6 +40,15 @@ public struct AutomationSettings: Sendable, Equatable {
     /// event: this is what bounds that loop. The user owns the number because
     /// how much of it is useful depends on their bot and their command.
     public var commentDailyLimit: Int
+    /// Whether a label put on an issue assigned to the user fires a command.
+    /// Off by default, like everything that starts a process.
+    public var labelTrigger: Bool
+    /// The label that fires it, by name. Empty means nothing fires.
+    public var label: String
+    /// The command that label fires. Separate from the other two because the
+    /// job is a third one: implementing an issue, not reading work that just
+    /// arrived and not answering a review.
+    public var labelCommandLine: String
 
     public init(
         enabled: Bool = false,
@@ -49,7 +58,10 @@ public struct AutomationSettings: Sendable, Equatable {
         allowedRepos: Set<String> = [],
         commentTrigger: Bool = false,
         commentCommandLine: String = "",
-        commentDailyLimit: Int = 3
+        commentDailyLimit: Int = 3,
+        labelTrigger: Bool = false,
+        label: String = "",
+        labelCommandLine: String = ""
     ) {
         self.enabled = enabled
         self.relations = relations
@@ -59,6 +71,9 @@ public struct AutomationSettings: Sendable, Equatable {
         self.commentTrigger = commentTrigger
         self.commentCommandLine = commentCommandLine
         self.commentDailyLimit = commentDailyLimit
+        self.labelTrigger = labelTrigger
+        self.label = label
+        self.labelCommandLine = labelCommandLine
     }
 }
 

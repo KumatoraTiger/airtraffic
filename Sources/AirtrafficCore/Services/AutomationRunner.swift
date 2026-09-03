@@ -50,12 +50,13 @@ public actor AutomationRunner {
     /// Runs the command for one task. Never throws: every failure is an
     /// `Outcome.failed` carrying a line the board can show.
     ///
-    /// `event` says which command runs: the arrival command when it is nil,
-    /// the review-comment command when a bot's review is what triggered this.
-    /// Both write into the same per-task directory, so a row keeps one folder
-    /// however many times it ran.
+    /// `trigger` says which of the three command lines runs; `event` carries
+    /// the review comment's own values, and is only passed with `.comment`.
+    /// All three write into the same per-task directory, so a row keeps one
+    /// folder however many times it ran.
     public func run(
-        task: TaskItem, settings: AutomationSettings, event: CommentEvent? = nil
+        task: TaskItem, settings: AutomationSettings, trigger: AutomationTrigger = .arrival,
+        event: CommentEvent? = nil
     ) -> Outcome {
         let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id)
         do {
@@ -67,7 +68,12 @@ public actor AutomationRunner {
         else {
             return .failed("タスクから GitHub の情報を読めませんでした")
         }
-        let commandLine = event == nil ? settings.commandLine : settings.commentCommandLine
+        let commandLine =
+            switch trigger {
+            case .arrival: settings.commandLine
+            case .comment: settings.commentCommandLine
+            case .label: settings.labelCommandLine
+            }
         let arguments = TaskAutomation.arguments(
             commandLine: commandLine, values: values)
         guard let command = arguments.first else { return .failed("コマンドが空です") }

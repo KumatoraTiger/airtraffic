@@ -180,6 +180,22 @@ final class AppModel {
                 automationCommentDailyLimit, forKey: Self.automationCommentLimitKey)
         }
     }
+    /// Label trigger: runs a command when an issue assigned to the user
+    /// carries the label named below.
+    var automationLabelTrigger: Bool {
+        didSet {
+            UserDefaults.standard.set(automationLabelTrigger, forKey: Self.automationLabelKey)
+        }
+    }
+    var automationLabel: String {
+        didSet { UserDefaults.standard.set(automationLabel, forKey: Self.automationLabelNameKey) }
+    }
+    var automationLabelCommand: String {
+        didSet {
+            UserDefaults.standard.set(
+                automationLabelCommand, forKey: Self.automationLabelCommandKey)
+        }
+    }
     /// What the last command did, for the settings screen.
     private(set) var automationStatus: String?
     /// Every run of the per-task command the store remembers, newest first.
@@ -193,7 +209,9 @@ final class AppModel {
             commandLine: automationCommand, workingDirectory: automationWorkingDirectory,
             allowedRepos: automationRepos, commentTrigger: automationCommentTrigger,
             commentCommandLine: automationCommentCommand,
-            commentDailyLimit: automationCommentDailyLimit)
+            commentDailyLimit: automationCommentDailyLimit,
+            labelTrigger: automationLabelTrigger, label: automationLabel,
+            labelCommandLine: automationLabelCommand)
     }
 
     /// Chime preferences for the pomodoro, persisted across launches.
@@ -252,6 +270,10 @@ final class AppModel {
     private var lastGitHubPass = Date.distantPast
     private var githubPassRunning = false
     private var automationRunning = false
+    /// The labels of the open issues the last GitHub pass read, by task id.
+    /// Kept in memory only: it is what that one pass saw, and the next pass
+    /// replaces it. Nothing runs from a stale answer, so nothing is stored.
+    private var githubIssueLabels: [String: [String]] = [:]
 
     static let githubEnabledKey = "github.enabled"
     static let githubExcludedKey = "github.excludedRepos"
@@ -265,6 +287,9 @@ final class AppModel {
     static let automationCommentKey = "automation.commentTrigger"
     static let automationCommentCommandKey = "automation.commentCommand"
     static let automationCommentLimitKey = "automation.commentDailyLimit"
+    static let automationLabelKey = "automation.labelTrigger"
+    static let automationLabelNameKey = "automation.label"
+    static let automationLabelCommandKey = "automation.labelCommand"
     /// GitHub is polled far less often than the transcripts: it is a network
     /// call, and an issue list does not change every three seconds.
     private static let githubInterval: TimeInterval = 300
@@ -310,6 +335,11 @@ final class AppModel {
             UserDefaults.standard.string(forKey: Self.automationCommentCommandKey) ?? ""
         automationCommentDailyLimit =
             UserDefaults.standard.object(forKey: Self.automationCommentLimitKey) as? Int ?? 3
+        automationLabelTrigger =
+            UserDefaults.standard.object(forKey: Self.automationLabelKey) as? Bool ?? false
+        automationLabel = UserDefaults.standard.string(forKey: Self.automationLabelNameKey) ?? ""
+        automationLabelCommand =
+            UserDefaults.standard.string(forKey: Self.automationLabelCommandKey) ?? ""
         soundSettings =
             UserDefaults.standard.data(forKey: "pomodoroSound")
             .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
@@ -389,40 +419,71 @@ final class AppModel {
         githubStatus =
             result.upserts.isEmpty
             ? "\(stamp) 同期しました（更新なし）" : "\(stamp) \(result.upserts.count) 件を更新しました"
+        githubIssueLabels = result.labels
         await refreshLists()
         await runAutomationPass()
+        await runIssueLabelPass()
         await runCommentPass()
     }
 
     // MARK: - Per-task command
 
     /// Runs the user's command once for each newly imported row it applies to.
+    func runAutomationPass() async {
+        guard let store, automationSettings.enabled, !automationRunning else { return }
+        let existing = (try? await store.tasks(includeArchived: true)) ?? []
+        await startRuns(
+            TaskAutomation.plan(tasks: existing, settings: automationSettings),
+            trigger: .arrival)
+    }
+
+    // MARK: - Label command
+
+    /// Runs the user's command once for each assigned issue carrying the label
+    /// they chose. The labels come from the GitHub pass that just ran; a pass
+    /// that could not read them starts nothing.
+    func runIssueLabelPass() async {
+        let settings = automationSettings
+        guard let store, settings.enabled, settings.labelTrigger, !automationRunning else {
+            return
+        }
+        let existing = (try? await store.tasks(includeArchived: true)) ?? []
+        await startRuns(
+            LabelTrigger.plan(tasks: existing, labels: githubIssueLabels, settings: settings),
+            trigger: .label)
+    }
+
+    /// Starts the planned rows one at a time.
     ///
     /// Sequential on purpose, and the state is written before the command
     /// starts: a crash mid-run leaves the row marked `running` rather than
     /// eligible again, so nothing is started twice.
-    func runAutomationPass() async {
-        guard let store, !automationRunning else { return }
+    ///
+    /// Shared by the two triggers whose event is the row itself. The comment
+    /// trigger keeps its own loop: its runs are identified by the event, and
+    /// it has an author and a daily limit to report.
+    private func startRuns(_ planned: [TaskItem], trigger: AutomationTrigger) async {
+        guard let store, !planned.isEmpty else { return }
         let settings = automationSettings
-        guard settings.enabled else { return }
-        let existing = (try? await store.tasks(includeArchived: true)) ?? []
-        let planned = TaskAutomation.plan(tasks: existing, settings: settings)
-        guard !planned.isEmpty else { return }
-
         automationRunning = true
         defer { automationRunning = false }
         for task in planned {
             let now = Date()
             let run = AutomationRun(
-                id: AutomationRun.arrivalId(taskId: task.id, now: now), taskId: task.id,
-                title: task.title, url: GitHubTaskSync.url(fromDetail: task.detail),
-                trigger: .arrival, startedAt: now)
+                id: AutomationRun.startId(trigger: trigger, taskId: task.id, now: now),
+                taskId: task.id, title: task.title,
+                url: GitHubTaskSync.url(fromDetail: task.detail), trigger: trigger,
+                startedAt: now)
             try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
-            let outcome = await automationRunner.run(task: task, settings: settings)
-            await finishRun(
-                run, task: task, outcome: outcome, success: "\(task.title) の生成物ができました")
+            let outcome = await automationRunner.run(
+                task: task, settings: settings, trigger: trigger)
+            let success =
+                trigger == .label
+                ? "\(task.title) を \(settings.label) で実行しました"
+                : "\(task.title) の生成物ができました"
+            await finishRun(run, task: task, outcome: outcome, success: success)
         }
     }
 
@@ -493,7 +554,7 @@ final class AppModel {
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
             let outcome = await automationRunner.run(
-                task: task, settings: settings, event: event)
+                task: task, settings: settings, trigger: .comment, event: event)
             await finishRun(
                 run, task: task, outcome: outcome,
                 success: "\(event.author) のレビューに対して実行しました")

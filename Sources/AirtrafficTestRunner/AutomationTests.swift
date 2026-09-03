@@ -26,6 +26,33 @@ struct AutomationTests {
         reviewTask(repo: repo, number: number, status: status, relation: .authored)
     }
 
+    /// An issue assigned to the user, the only kind of row the label trigger
+    /// ever fires on.
+    private func issueTask(
+        repo: String = "alex/demo", number: Int = 12, state: AutomationState? = nil,
+        status: TaskStatus = .todo
+    ) -> TaskItem {
+        let item = GitHubItem(
+            repo: repo, number: number, title: "検索を速くする",
+            url: "https://github.com/\(repo)/issues/\(number)", relation: .assigned,
+            isPullRequest: false)
+        return TaskItem(
+            id: item.taskId, title: GitHubTaskSync.title(for: item),
+            detail: GitHubTaskSync.detail(for: item), status: status, rank: nil,
+            source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [],
+            automationState: state)
+    }
+
+    private func labelSettings(
+        enabled: Bool = true, labelTrigger: Bool = true, label: String = "ai",
+        labelCommand: String = "/usr/bin/true {url}", repos: Set<String> = ["alex/demo"]
+    ) -> AutomationSettings {
+        AutomationSettings(
+            enabled: enabled, relations: [.reviewRequested], commandLine: "/usr/bin/true {url}",
+            allowedRepos: repos, labelTrigger: labelTrigger, label: label,
+            labelCommandLine: labelCommand)
+    }
+
     private func comment(
         id: Int, author: String = "coderabbitai[bot]", type: String? = "Bot",
         repo: String = "alex/demo", number: Int = 7, ageInSeconds: TimeInterval = 600,
@@ -376,6 +403,110 @@ struct AutomationTests {
             else { return expect(false, "writing nothing is not success") }
             expect(reason.contains("何も書かれませんでした"), reason)
             expect(path == nil, "nothing new to point at")
+        }
+
+        await kit.run("an assigned issue carrying the label qualifies once") {
+            let task = issueTask()
+            let planned = LabelTrigger.plan(
+                tasks: [task], labels: [task.id: ["bug", "ai"]], settings: labelSettings())
+            expectEqual(planned.map(\.id), [task.id])
+
+            // The state written before the command starts is what stops the
+            // next pass from starting it again.
+            let ran = issueTask(state: .done)
+            expect(
+                LabelTrigger.plan(
+                    tasks: [ran], labels: [ran.id: ["ai"]], settings: labelSettings()
+                ).isEmpty,
+                "a row that already ran never runs again")
+            let failed = issueTask(state: .failed)
+            expect(
+                LabelTrigger.plan(
+                    tasks: [failed], labels: [failed.id: ["ai"]], settings: labelSettings()
+                )
+                .isEmpty,
+                "a failed row waits for a manual reset")
+        }
+
+        await kit.run("the label is matched whatever its case and spacing") {
+            expect(LabelTrigger.matches(labels: ["AI"], label: " ai "), "case and spaces")
+            expect(LabelTrigger.matches(labels: [" ai "], label: "AI"), "either side")
+            expect(!LabelTrigger.matches(labels: ["ai-review"], label: "ai"), "not a prefix")
+            expect(!LabelTrigger.matches(labels: ["ai"], label: "  "), "an empty label fires nothing")
+        }
+
+        await kit.run("a label nothing was read for, or a row of another kind, fires nothing") {
+            let task = issueTask()
+            expect(
+                LabelTrigger.plan(tasks: [task], labels: [:], settings: labelSettings()).isEmpty,
+                "labels the pass could not read must not look like a match")
+            expect(
+                LabelTrigger.plan(
+                    tasks: [task], labels: [task.id: ["ai"]],
+                    settings: labelSettings(repos: ["alex/other"])
+                ).isEmpty,
+                "the repository has to be allowed")
+            expect(
+                LabelTrigger.plan(
+                    tasks: [issueTask(status: .done)], labels: [task.id: ["ai"]],
+                    settings: labelSettings()
+                ).isEmpty,
+                "a finished row is not implemented again")
+            // Somebody else's pull request, and the user's own: neither is an
+            // issue assigned to them.
+            let others = [reviewTask(number: 8), authoredTask(number: 9)]
+            expect(
+                LabelTrigger.plan(
+                    tasks: others,
+                    labels: Dictionary(uniqueKeysWithValues: others.map { ($0.id, ["ai"]) }),
+                    settings: labelSettings()
+                ).isEmpty,
+                "a pull request row never fires the label trigger")
+        }
+
+        await kit.run("the label trigger stays off without its switch, label or command") {
+            let task = issueTask()
+            let labels = [task.id: ["ai"]]
+            for settings in [
+                labelSettings(enabled: false),
+                labelSettings(labelTrigger: false),
+                labelSettings(label: ""),
+                labelSettings(labelCommand: "   "),
+            ] {
+                expect(
+                    LabelTrigger.plan(tasks: [task], labels: labels, settings: settings).isEmpty,
+                    "nothing runs until all four are set")
+            }
+        }
+
+        await kit.run("one pass starts at most three label runs") {
+            let tasks = (1...5).map { issueTask(number: $0) }
+            let labels = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, ["ai"]) })
+            expectEqual(
+                LabelTrigger.plan(tasks: tasks, labels: labels, settings: labelSettings()).count,
+                LabelTrigger.runLimit)
+        }
+
+        await kit.run("a label run runs the label command, not the arrival one") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            let runner = AutomationRunner(base: base)
+            let task = issueTask()
+            let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id).path
+            // The arrival command writes nothing, so only the label command
+            // can be what produced the file.
+            let settings = AutomationSettings(
+                enabled: true, commandLine: "/bin/sh -c 'exit 0'", workingDirectory: "/tmp",
+                allowedRepos: ["alex/demo"], labelTrigger: true, label: "ai",
+                labelCommandLine: "/bin/sh -c 'echo done > \"$0/実装.md\"' {outDir}")
+
+            expectEqual(
+                await runner.run(task: task, settings: settings, trigger: .label),
+                .produced(directory))
+            expect(
+                FileManager.default.fileExists(atPath: directory + "/実装.md"),
+                "the label command's output is there")
         }
 
         await kit.run("an artifact directory is one flat name per task") {

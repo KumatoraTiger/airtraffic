@@ -129,16 +129,22 @@ struct AutomationRunRow: View {
         }
     }
 
-    /// What fired the command: a new row, or the named bot's review. The
-    /// `[bot]` suffix goes, since every login here has it, and a long login
-    /// is shortened so it cannot push the title off the row.
+    /// What fired the command: a new row, a label the user put on an issue,
+    /// or the named bot's review. The `[bot]` suffix goes, since every login
+    /// here has it, and a long login is shortened so it cannot push the title
+    /// off the row.
     private var triggerBadge: some View {
         let text =
             switch run.trigger {
-            case .arrival: run.trigger.displayName
             case .comment: run.author.map { "\(Self.botName($0)) のレビュー" } ?? run.trigger.displayName
+            case .arrival, .label: run.trigger.displayName
             }
-        let color: Color = run.trigger == .comment ? .orange : .blue
+        let color: Color =
+            switch run.trigger {
+            case .arrival: .blue
+            case .comment: .orange
+            case .label: .purple
+            }
         return Text(text)
             .font(.caption2.bold())
             .lineLimit(1)
@@ -146,7 +152,16 @@ struct AutomationRunRow: View {
             .padding(.vertical, 1)
             .background(color.opacity(0.15), in: Capsule())
             .foregroundStyle(color)
-            .help(run.author.map { "\($0) のレビューコメントで起動" } ?? "新しく届いた行で起動")
+            .help(badgeHelp)
+    }
+
+    /// What the badge says when the pointer rests on it.
+    private var badgeHelp: String {
+        switch run.trigger {
+        case .arrival: "新しく届いた行で起動"
+        case .comment: run.author.map { "\($0) のレビューコメントで起動" } ?? "レビューコメントで起動"
+        case .label: "issue に付いたラベルで起動"
+        }
     }
 
     /// `coderabbitai[bot]` → `coderabbitai`; a login longer than 18
