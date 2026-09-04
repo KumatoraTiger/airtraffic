@@ -5,12 +5,14 @@ import SwiftUI
 /// attached. Session status only paints badges on rows; it never moves a row
 /// between sections. Sections, in the order the user should spend attention:
 ///
-/// - 自動実行: the agents the per-task command started on GitHub events —
-///   running now, or finished within the day (`AutomationRunsSection`)
 /// - 今日やる: the tasks the user picked for today's focus; they stay here
 ///   until taken off by hand
 /// - タスク: the priority list itself — every other open task, in rank order,
 ///   with its subtasks and linked sessions hanging under it as a tree
+/// - 自動実行: the agents the per-task command started on GitHub events —
+///   running now, or finished within the day (`AutomationRunsSection`).
+///   Below the task list: it reports work already under way, so it is read
+///   after the list the user acts on.
 /// - 完了: done tasks, with their sessions
 ///
 /// Agent sessions matching no task are not shown: the board is about the
@@ -28,8 +30,8 @@ struct BoardView: View {
                     systemImage: "airplane.departure",
                     description: Text("下の欄で追加するか、設定で GitHub 連携をオンにすると並びます"))
             }
-            AutomationRunsSection()
             todayAndTaskSection
+            AutomationRunsSection()
             doneSection
         }
     }
