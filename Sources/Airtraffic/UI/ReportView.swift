@@ -2,8 +2,8 @@ import AirtrafficCore
 import AppKit
 import SwiftUI
 
-/// 今日のふりかえり: a live view of everything finished (and moved) so far
-/// today, plus on-demand 日報 generation. Opened mid-day it shows the day up
+/// 今日のふりかえり: a live view of what is done and what is left of today's
+/// plan, plus on-demand 日報 generation. Opened mid-day it shows the day up
 /// to now; the lists recompute from current state on every render.
 struct ReportView: View {
     @Environment(AppModel.self) private var model
@@ -13,7 +13,6 @@ struct ReportView: View {
         VStack(spacing: 0) {
             List {
                 completedSection
-                activitySection
                 remainingSection
                 reportSection
             }
@@ -83,36 +82,6 @@ struct ReportView: View {
         }
     }
 
-    private var activitySection: some View {
-        Section {
-            if model.activityToday.isEmpty {
-                Text("今日動いたセッションはまだありません")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-            ForEach(model.activityToday) { item in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(item.title)
-                        Spacer()
-                        Text(stateText(item.state))
-                            .font(.caption)
-                            .foregroundStyle(stateColor(item.state))
-                    }
-                    Text(subtitle(for: item))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        } header: {
-            Label(
-                "今日の動き (\(model.activityToday.count))",
-                systemImage: "antenna.radiowaves.left.and.right"
-            )
-            .foregroundStyle(.gray)
-        }
-    }
-
     private var remainingSection: some View {
         Section {
             if model.remainingToday.isEmpty {
@@ -163,31 +132,6 @@ struct ReportView: View {
     }
 
     // MARK: - Helpers
-
-    private func stateText(_ state: DailyReporter.ActivityState) -> String {
-        state.displayName
-    }
-
-    /// 確認待ち reads as "still mine to do", but a session can also sit there
-    /// because the work finished and the tab was left open. The row shows the
-    /// state and the elapsed time and leaves that call to the user.
-    private func stateColor(_ state: DailyReporter.ActivityState) -> Color {
-        switch state {
-        case .running: .green
-        case .awaitingUser: .orange
-        case .quiet: .secondary
-        }
-    }
-
-    private func subtitle(for item: DailyReporter.ActivityItem) -> String {
-        var parts: [String] = []
-        if !item.project.isEmpty { parts.append(item.project) }
-        parts.append("\(timeText(item.firstActivity))–\(timeText(item.lastActivity))")
-        if item.sessionCount > 1 { parts.append("セッション\(item.sessionCount)件") }
-        parts.append(item.agents.map(\.displayName).joined(separator: ", "))
-        if !item.openTodos.isEmpty { parts.append("未完了\(item.openTodos.count)件") }
-        return parts.joined(separator: " · ")
-    }
 
     private func timeText(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .shortened)

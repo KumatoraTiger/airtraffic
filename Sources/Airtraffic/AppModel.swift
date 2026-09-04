@@ -995,11 +995,6 @@ final class AppModel {
         reporter.completedToday(tasks)
     }
 
-    /// Today's session activity, one row per distinct piece of work.
-    var activityToday: [DailyReporter.ActivityItem] {
-        reporter.activityToday(sessions: sessions, labels: labels)
-    }
-
     /// 今日やる picks not finished yet — what the report calls 残っていること.
     var remainingToday: [TaskItem] {
         tasks.filter { $0.isToday && $0.status != .done && $0.status != .archived }
@@ -1013,9 +1008,6 @@ final class AppModel {
         defer { reportBusy = false }
         do {
             let client = try makeClient()
-            let activity = activityToday
-            let plan = reporter.comparePlan(
-                tasks: tasks, activity: activity, sessions: sessions, labels: labels)
             // Reading commits shells out to git once per repository, so it
             // runs off the main actor while the report is being prepared.
             let repoPaths = Set(
@@ -1025,8 +1017,9 @@ final class AppModel {
                 log.commitsToday(paths: Array(repoPaths))
             }.value
             let completed = completedToday
+            let carryOver = remainingToday
             let input = reporter.reportInput(
-                completed: completed, plan: plan, commits: commits)
+                completed: completed, carryOver: carryOver, commits: commits)
             let reply = try await client.complete(
                 LLMRequest(
                     system: reporter.systemPrompt(),
@@ -1035,7 +1028,8 @@ final class AppModel {
             if let parsed = reporter.parseReport(from: reply) {
                 report = parsed
                 reportMetrics = DayMetrics.build(
-                    plan: plan, commits: commits, completedTasks: completed.count)
+                    commits: commits, completedTasks: completed.count,
+                    carryOver: carryOver.count)
                 reportFallback = nil
             } else {
                 report = nil

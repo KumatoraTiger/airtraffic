@@ -31,7 +31,7 @@ public enum DailyReportRenderer {
           \(entryGroup(title: "詰まっているところ", accent: "amber", entries: report.stuck))
           \(entryGroup(title: "明日に持ち越し", accent: "blue", entries: report.carryOver))
           \(closing(report.closing))
-          <p class="footer">セッション記録と git log から生成。文章は事実の要約です。</p>
+          <p class="footer">完了したタスクと git log から生成。文章は事実の要約です。</p>
         </main>
         </body>
         </html>
@@ -111,13 +111,13 @@ public enum DailyReportRenderer {
 
     // MARK: - Tiles
 
-    /// The day in four numbers. Every one is counted from the scanned facts,
-    /// so the tiles and the prose cannot drift apart.
+    /// The day in four numbers. Every one is counted from the task list and
+    /// from git, so the tiles and the prose cannot drift apart.
     private static func tiles(_ metrics: DayMetrics) -> String {
         let cells = [
             (metrics.completedTasks, "完了したタスク"),
-            (metrics.workItems, "動いた作業"),
-            (metrics.sessions, "セッション"),
+            (metrics.carryOver, "持ち越し"),
+            (metrics.repoCount, "リポジトリ"),
             (metrics.commitTotal, "コミット"),
         ]
         let body = cells.map { count, label in
@@ -223,95 +223,11 @@ public enum DailyReportRenderer {
 
     private static func figures(_ metrics: DayMetrics) -> String {
         guard !metrics.isEmpty else { return "" }
-        // Prose first, charts second: the figures back up what the cards and
-        // the timeline already said, so they read better after them.
-        // Commits are already a tile; a bar chart of one or two repositories
-        // says nothing the number did not. It earns its space from three.
-        let commits = metrics.commits.count >= 3 ? commitBars(metrics) : ""
-        return timeline(metrics) + planSplit(metrics) + commits
-    }
-
-    /// Where the day went: one row per piece of work, positioned on a shared
-    /// hour scale. State is carried by color *and* by the label on the row, so
-    /// the rows stay readable without color.
-    private static func timeline(_ metrics: DayMetrics) -> String {
-        guard !metrics.timeline.isEmpty else { return "" }
-        let start = metrics.windowStart
-        let span = max(metrics.now.timeIntervalSince(start), 3600)
-
-        func offset(_ date: Date) -> Double {
-            min(max(date.timeIntervalSince(start) / span, 0), 1) * 100
-        }
-
-        var rows = ""
-        for bar in metrics.timeline {
-            let left = offset(bar.start)
-            // A bar thinner than this reads as a dot and loses its position.
-            let width = max(offset(bar.end) - left, 1.5)
-            let state = stateClass(bar.state)
-            let label =
-                "\(bar.state.displayName) · \(time(bar.start))–\(time(bar.end))"
-                + (bar.sessionCount > 1 ? " · \(bar.sessionCount)セッション" : "")
-            rows += """
-                <div class="row">
-                  <p class="row-label">\(escape(bar.title))<span>\(escape(label))</span></p>
-                  <div class="track">
-                    <div class="bar \(state)" style="left:\(pct(left));width:\(pct(width));" \
-                title="\(escape(bar.title)) \(escape(label))"></div>
-                  </div>
-                </div>
-                """
-        }
-
-        var ticks = ""
-        for date in hourTicks(from: start, to: metrics.now) {
-            ticks += "<span style=\"left:\(pct(offset(date)));\">\(time(date))</span>"
-        }
-
-        return """
-            <section class="figure">
-              <h2>時間の使いみち<span class="count">\(metrics.timeline.count)</span></h2>
-              <div class="chart">\(rows)<div class="axis">\(ticks)</div></div>
-              <p class="legend">
-                <span class="key running"></span>実行中
-                <span class="key awaiting"></span>確認待ち
-                <span class="key quiet"></span>停止
-              </p>
-              <p class="note">セッションの記録された時刻から引いた幅です。実際の着手時刻より狭く出ることがあります。</p>
-            </section>
-            """
-    }
-
-    /// The plan against the day: one stacked bar, every segment labeled.
-    private static func planSplit(_ metrics: DayMetrics) -> String {
-        let parts = [
-            ("予定して進んだ", metrics.plannedWorked, "s1"),
-            ("予定外に動いた", metrics.unplanned, "s2"),
-            ("手が付かなかった", metrics.plannedUntouched, "s3"),
-        ].filter { $0.1 > 0 }
-        let total = parts.reduce(0) { $0 + $1.1 }
-        guard total > 0 else { return "" }
-
-        var segments = ""
-        var legend = ""
-        for (label, count, slot) in parts {
-            let share = Double(count) / Double(total) * 100
-            segments += """
-                <div class="seg \(slot)" style="width:\(pct(share));" \
-                title="\(escape(label)) \(count)件"></div>
-                """
-            legend += """
-                <span class="item"><span class="key \(slot)"></span>\(escape(label))\
-                    <strong>\(count)</strong></span>
-                """
-        }
-        return """
-            <section class="figure">
-              <h2>予定と実際<span class="count">\(total)</span></h2>
-              <div class="stack">\(segments)</div>
-              <p class="legend">\(legend)</p>
-            </section>
-            """
+        // Prose first, charts second: the figure backs up what the cards
+        // already said, so it reads better after them. A bar chart of one or
+        // two repositories says nothing the tile did not; it earns its space
+        // from three.
+        return metrics.commits.count >= 3 ? commitBars(metrics) : ""
     }
 
     /// What actually landed: commits per repository, each bar labeled.
@@ -339,36 +255,8 @@ public enum DailyReportRenderer {
             """
     }
 
-    /// Hour marks every three hours, so a long day keeps a readable axis.
-    public static func hourTicks(from start: Date, to end: Date, calendar: Calendar = .current)
-        -> [Date]
-    {
-        var ticks: [Date] = []
-        var cursor = start
-        while cursor <= end, ticks.count < 12 {
-            ticks.append(cursor)
-            guard let next = calendar.date(byAdding: .hour, value: 3, to: cursor) else { break }
-            cursor = next
-        }
-        return ticks
-    }
-
     private static func pct(_ value: Double) -> String {
         String(format: "%.2f%%", value)
-    }
-
-    private static func time(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
-    }
-
-    private static func stateClass(_ state: DailyReporter.ActivityState) -> String {
-        switch state {
-        case .running: "running"
-        case .awaitingUser: "awaiting"
-        case .quiet: "quiet"
-        }
     }
 
     /// Everything the LLM wrote is text, never markup: escape before it lands
@@ -393,7 +281,6 @@ public enum DailyReportRenderer {
           --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --neutral: #8e8e94;
           --s1-soft: #e8f1fc; --s2-soft: #fceee7; --s3-soft: #e6f6ef;
           --neutral-soft: #f0f0f2;
-          --state-running: #0ca30c; --state-awaiting: #fab219; --state-quiet: #9a9aa0;
           --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.05);
         }
         @media (prefers-color-scheme: dark) {
@@ -406,7 +293,6 @@ public enum DailyReportRenderer {
             --s1: #3987e5; --s2: #d95926; --s3: #199e70; --neutral: #85858d;
             --s1-soft: #1d2c3f; --s2-soft: #3a2318; --s3-soft: #14302633;
             --neutral-soft: #2f2f35;
-            --state-running: #0ca30c; --state-awaiting: #fab219; --state-quiet: #75757c;
             --shadow: 0 1px 2px rgba(0,0,0,.3);
           }
         }
@@ -557,40 +443,7 @@ public enum DailyReportRenderer {
           position: relative; height: 10px; border-radius: 5px; background: var(--grid);
         }
         .bar { position: absolute; top: 0; height: 10px; border-radius: 5px; }
-        .bar.running { background: var(--state-running); }
-        .bar.awaiting { background: var(--state-awaiting); }
-        .bar.quiet { background: var(--state-quiet); }
         .bar.s1 { background: var(--s1); }
-        .axis {
-          position: relative; height: 16px; margin-top: 2px;
-          border-top: 1px solid var(--line);
-        }
-        .axis span {
-          position: absolute; top: 2px; transform: translateX(-50%);
-          font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
-        }
-        .stack { display: flex; gap: 2px; height: 14px; }
-        .stack .seg { border-radius: 3px; min-width: 3px; }
-        .seg.s1 { background: var(--s1); }
-        .seg.s2 { background: var(--s2); }
-        .seg.s3 { background: var(--s3); }
-        .legend {
-          margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 14px;
-          font-size: 11px; color: var(--muted); align-items: center;
-        }
-        .legend .item { display: inline-flex; align-items: center; gap: 6px; }
-        .legend strong { color: var(--ink); font-variant-numeric: tabular-nums; }
-        .key {
-          width: 10px; height: 10px; border-radius: 3px; display: inline-block;
-          margin-right: 6px; vertical-align: -1px;
-        }
-        .key.running { background: var(--state-running); }
-        .key.awaiting { background: var(--state-awaiting); }
-        .key.quiet { background: var(--state-quiet); }
-        .key.s1 { background: var(--s1); margin-right: 0; }
-        .key.s2 { background: var(--s2); margin-right: 0; }
-        .key.s3 { background: var(--s3); margin-right: 0; }
-        .note { margin: 8px 0 0; font-size: 11px; color: var(--muted); }
         @media (max-width: 720px) {
           .wrap { padding: 24px 18px 32px; }
           h1 { font-size: 24px; }
