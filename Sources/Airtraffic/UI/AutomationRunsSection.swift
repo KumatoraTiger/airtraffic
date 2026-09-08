@@ -133,8 +133,8 @@ struct AutomationRunRow: View {
         }
     }
 
-    /// What this run is about: the kind of row that arrived, a label the user
-    /// put on an issue, or the named bot's review. The `[bot]` suffix goes,
+    /// What this run is about: the kind of row that arrived, the label the
+    /// user put on an issue, or the named bot's review. The `[bot]` suffix goes,
     /// since every login here has it, and a long login is shortened so it
     /// cannot push the title off the row.
     private var triggerBadge: some View {
@@ -142,7 +142,9 @@ struct AutomationRunRow: View {
         // decides whether the bot names the badge. Everything else — including
         // a comment run whose author went unread — is `triggerLabel`'s to
         // answer, so the enum is switched over in one place, in the model.
-        let text = run.author.map { "\(Self.botName($0)) のレビュー" } ?? run.triggerLabel
+        // A label is typed by the user and can be as long as GitHub allows,
+        // so it is clamped the same way a long bot login is.
+        let text = run.author.map { "\(Self.botName($0)) のレビュー" } ?? Self.clamp(run.triggerLabel)
         let color: Color =
             switch run.trigger {
             case .arrival: .blue
@@ -173,16 +175,22 @@ struct AutomationRunRow: View {
         case .arrival:
             run.relation.map { "\($0.displayName)が新しく届いて起動" } ?? "新しく届いた行で起動"
         case .comment: run.author.map { "\($0) のレビューコメントで起動" } ?? "レビューコメントで起動"
-        case .label: "issue に付いたラベルで起動"
+        case .label: run.matchedLabel.map { "issue の \($0) ラベルで起動" } ?? "issue に付いたラベルで起動"
         }
     }
 
-    /// `coderabbitai[bot]` → `coderabbitai`; a login longer than 18
-    /// characters keeps its head and tail around an ellipsis.
+    /// Keeps a badge from growing past what the row can spare: anything
+    /// longer keeps its head and tail around an ellipsis. The badge is never
+    /// compressed by the layout, so the text has to bound itself.
+    static func clamp(_ text: String, to limit: Int = 14) -> String {
+        guard text.count > limit else { return text }
+        return "\(text.prefix(limit / 2))…\(text.suffix(limit / 2 - 1))"
+    }
+
+    /// `coderabbitai[bot]` → `coderabbitai`, clamped like any other badge:
+    /// every login here carries the suffix, so it says nothing.
     static func botName(_ login: String) -> String {
-        let name = login.hasSuffix("[bot]") ? String(login.dropLast(5)) : login
-        guard name.count > 18 else { return name }
-        return "\(name.prefix(9))…\(name.suffix(8))"
+        clamp(login.hasSuffix("[bot]") ? String(login.dropLast(5)) : login, to: 18)
     }
 
     /// Elapsed time while running, the finish time otherwise.

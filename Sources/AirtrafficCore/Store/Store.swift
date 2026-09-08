@@ -121,7 +121,8 @@ public actor Store {
                 state TEXT NOT NULL,
                 reason TEXT,
                 artifact_path TEXT,
-                relation TEXT
+                relation TEXT,
+                matched_label TEXT
             );
             """)
         // The kind of GitHub row a run fired on, so the board's badge can name
@@ -130,6 +131,12 @@ public actor Store {
         let columns = try db.query("PRAGMA table_info(automation_runs)").map { $0.text("name") }
         if !columns.contains("relation") {
             try db.execute("ALTER TABLE automation_runs ADD COLUMN relation TEXT")
+        }
+        // Which label fired a label run, now that several labels can each
+        // name their own command. Rows written before this column answer nil
+        // and their badge falls back to 「ラベル」.
+        if !columns.contains("matched_label") {
+            try db.execute("ALTER TABLE automation_runs ADD COLUMN matched_label TEXT")
         }
         let tables = try db.query("SELECT name FROM sqlite_master WHERE type = 'table'")
             .map { $0.text("name") }
@@ -268,8 +275,8 @@ public actor Store {
         try db.execute(
             """
             INSERT OR IGNORE INTO automation_runs
-                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path, relation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path, relation, matched_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 .text(run.id), .text(run.taskId), .text(run.title),
@@ -282,6 +289,7 @@ public actor Store {
                 run.reason.map { .text($0) } ?? .null,
                 run.artifactPath.map { .text($0) } ?? .null,
                 run.relation.map { .text($0.rawValue) } ?? .null,
+                run.matchedLabel.map { .text($0) } ?? .null,
             ])
     }
 
@@ -329,6 +337,7 @@ public actor Store {
                 url: row.textOrNil("url"),
                 trigger: AutomationTrigger(rawValue: row.text("trigger")) ?? .comment,
                 author: row.textOrNil("author"),
+                matchedLabel: row.textOrNil("matched_label"),
                 startedAt: Date(timeIntervalSince1970: row.real("started_at")),
                 finishedAt: row.realOrNil("finished_at").map(Date.init(timeIntervalSince1970:)),
                 state: AutomationState(rawValue: row.text("state")) ?? .failed,

@@ -249,13 +249,31 @@ struct AutomationSection: View {
             }
             Divider()
             Toggle("担当 issue にラベルが付いたら実行する", isOn: $model.automationLabelTrigger)
-            TextField("実行のきっかけにするラベル名", text: $model.automationLabel)
-                .textFieldStyle(.roundedBorder)
-            TextField("ラベル用のコマンド", text: $model.automationLabelCommand)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
+            ForEach($model.automationLabelRules) { $rule in
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(spacing: 4) {
+                        TextField("ラベル名", text: $rule.label)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("そのラベルで動かすコマンド", text: $rule.commandLine)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    Button {
+                        model.automationLabelRules.removeAll { $0.id == rule.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("このラベルを消す")
+                }
+            }
+            Button("ラベルを追加") {
+                model.automationLabelRules.append(LabelRule())
+            }
             Text(
                 "対象は自分が担当している open な issue だけです。上の置換がそのまま使えます。"
+                    + "ラベルごとに別のコマンドを書けるので、issue を磨くもの、実装するもの、と分けられます。"
+                    + "1つの issue に複数のラベルが付いていたときは、上にあるものが動きます。"
                     + "同じ issue で二度は動きません。もう一度動かしたいときは、"
                     + "ボードの自動実行の行を右クリックして「もう一度動けるようにする」を選んでください。"
                     + "ラベルを外しても、動き出したコマンドは止まりません。"

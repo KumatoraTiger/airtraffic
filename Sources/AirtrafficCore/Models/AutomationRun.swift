@@ -46,6 +46,10 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
     public var trigger: AutomationTrigger
     /// Login of the bot whose review fired a `.comment` run.
     public var author: String?
+    /// The label that fired a `.label` run, as the rule spells it. Nil for
+    /// every other trigger, and for a label run an older build wrote — back
+    /// when there was only one label to name.
+    public var matchedLabel: String?
     public var startedAt: Date
     /// Nil while the command is still running.
     public var finishedAt: Date?
@@ -61,9 +65,9 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
 
     public init(
         id: String, taskId: String, title: String, url: String? = nil,
-        trigger: AutomationTrigger, author: String? = nil, startedAt: Date,
-        finishedAt: Date? = nil, state: AutomationState = .running, reason: String? = nil,
-        artifactPath: String? = nil, relation: GitHubRelation? = nil
+        trigger: AutomationTrigger, author: String? = nil, matchedLabel: String? = nil,
+        startedAt: Date, finishedAt: Date? = nil, state: AutomationState = .running,
+        reason: String? = nil, artifactPath: String? = nil, relation: GitHubRelation? = nil
     ) {
         self.id = id
         self.taskId = taskId
@@ -71,6 +75,7 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
         self.url = url
         self.trigger = trigger
         self.author = author
+        self.matchedLabel = matchedLabel
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.state = state
@@ -87,13 +92,17 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
     /// a review request and the user's own pull request read identically, and
     /// the row's timestamps already answer "when".
     ///
-    /// The other two triggers keep their own name: for a label the trigger IS
-    /// the news (the relation is always 担当 issue), and for a comment the
-    /// bot's login is what the caller puts in front of 「のレビュー」.
+    /// The other two triggers keep their own name: for a comment the bot's
+    /// login is what the caller puts in front of 「のレビュー」, and for a
+    /// label it is the label itself — with several rules configured, 「ラベル」
+    /// alone would be the same badge on two runs that ran different commands,
+    /// which is the mistake 「新着」 made. A run from before the rules were a
+    /// list falls back to 「ラベル」.
     public var triggerLabel: String {
         switch trigger {
         case .arrival: relation?.displayName ?? trigger.displayName
-        case .comment, .label: trigger.displayName
+        case .label: matchedLabel ?? trigger.displayName
+        case .comment: trigger.displayName
         }
     }
 

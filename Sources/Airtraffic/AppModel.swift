@@ -187,13 +187,13 @@ final class AppModel {
             UserDefaults.standard.set(automationLabelTrigger, forKey: Self.automationLabelKey)
         }
     }
-    var automationLabel: String {
-        didSet { UserDefaults.standard.set(automationLabel, forKey: Self.automationLabelNameKey) }
-    }
-    var automationLabelCommand: String {
+    /// The labels that fire a command, each with its own command line, in the
+    /// order the settings screen shows them. An issue carrying two of them
+    /// runs the first.
+    var automationLabelRules: [LabelRule] {
         didSet {
-            UserDefaults.standard.set(
-                automationLabelCommand, forKey: Self.automationLabelCommandKey)
+            guard let data = try? JSONEncoder().encode(automationLabelRules) else { return }
+            UserDefaults.standard.set(data, forKey: Self.automationLabelRulesKey)
         }
     }
     /// What the last command did, for the settings screen.
@@ -210,8 +210,7 @@ final class AppModel {
             allowedRepos: automationRepos, commentTrigger: automationCommentTrigger,
             commentCommandLine: automationCommentCommand,
             commentDailyLimit: automationCommentDailyLimit,
-            labelTrigger: automationLabelTrigger, label: automationLabel,
-            labelCommandLine: automationLabelCommand)
+            labelTrigger: automationLabelTrigger, labelRules: automationLabelRules)
     }
 
     /// Chime preferences for the pomodoro, persisted across launches.
@@ -290,8 +289,29 @@ final class AppModel {
     static let automationCommentCommandKey = "automation.commentCommand"
     static let automationCommentLimitKey = "automation.commentDailyLimit"
     static let automationLabelKey = "automation.labelTrigger"
+    static let automationLabelRulesKey = "automation.labelRules"
+    /// The single label and command the trigger held before it took a list.
+    /// Read once, to carry an existing setup into the new key.
     static let automationLabelNameKey = "automation.label"
     static let automationLabelCommandKey = "automation.labelCommand"
+
+    /// The label rules as they were last saved, or the single label and
+    /// command an earlier build wrote, turned into one rule.
+    ///
+    /// The old keys are read but never written again: an installed build on
+    /// the old code shares this defaults domain, and leaving its keys where
+    /// they are keeps it running its one label until it is replaced.
+    private static func storedLabelRules() -> [LabelRule] {
+        if let data = UserDefaults.standard.data(forKey: automationLabelRulesKey),
+            let saved = try? JSONDecoder().decode([LabelRule].self, from: data)
+        {
+            return saved
+        }
+        let migrated = LabelRule(
+            label: UserDefaults.standard.string(forKey: automationLabelNameKey) ?? "",
+            commandLine: UserDefaults.standard.string(forKey: automationLabelCommandKey) ?? "")
+        return migrated.isUsable ? [migrated] : []
+    }
     /// GitHub is polled far less often than the transcripts: it is a network
     /// call, and an issue list does not change every three seconds.
     private static let githubInterval: TimeInterval = 300
@@ -339,9 +359,7 @@ final class AppModel {
             UserDefaults.standard.object(forKey: Self.automationCommentLimitKey) as? Int ?? 3
         automationLabelTrigger =
             UserDefaults.standard.object(forKey: Self.automationLabelKey) as? Bool ?? false
-        automationLabel = UserDefaults.standard.string(forKey: Self.automationLabelNameKey) ?? ""
-        automationLabelCommand =
-            UserDefaults.standard.string(forKey: Self.automationLabelCommandKey) ?? ""
+        automationLabelRules = Self.storedLabelRules()
         soundSettings =
             UserDefaults.standard.data(forKey: "pomodoroSound")
             .flatMap { try? JSONDecoder().decode(PomodoroSoundSettings.self, from: $0) }
@@ -438,7 +456,8 @@ final class AppModel {
         guard let store, automationSettings.enabled, !automationRunning else { return }
         let existing = (try? await store.tasks(includeArchived: true)) ?? []
         await startRuns(
-            TaskAutomation.plan(tasks: existing, settings: automationSettings),
+            TaskAutomation.plan(tasks: existing, settings: automationSettings)
+                .map { ($0, nil) },
             trigger: .arrival)
     }
 
@@ -454,7 +473,8 @@ final class AppModel {
         }
         let existing = (try? await store.tasks(includeArchived: true)) ?? []
         await startRuns(
-            LabelTrigger.plan(tasks: existing, labels: githubIssueLabels, settings: settings),
+            LabelTrigger.plan(tasks: existing, labels: githubIssueLabels, settings: settings)
+                .map { ($0.task, $0.rule) },
             trigger: .label)
     }
 
@@ -467,28 +487,33 @@ final class AppModel {
     /// Shared by the two triggers whose event is the row itself. The comment
     /// trigger keeps its own loop: its runs are identified by the event, and
     /// it has an author and a daily limit to report.
-    private func startRuns(_ planned: [TaskItem], trigger: AutomationTrigger) async {
+    ///
+    /// A row carries the label rule that picked it up, which only a label run
+    /// has: the arrival trigger has one command line, so its rows pass nil.
+    private func startRuns(
+        _ planned: [(task: TaskItem, rule: LabelRule?)], trigger: AutomationTrigger
+    ) async {
         guard let store, !planned.isEmpty else { return }
         let settings = automationSettings
         automationRunning = true
         defer { automationRunning = false }
-        for task in planned {
+        for (task, rule) in planned {
             let now = Date()
             let run = AutomationRun(
                 id: AutomationRun.startId(trigger: trigger, taskId: task.id, now: now),
                 taskId: task.id, title: task.title,
                 url: GitHubTaskSync.url(fromDetail: task.detail), trigger: trigger,
+                matchedLabel: rule?.label,
                 startedAt: now,
                 relation: GitHubTaskSync.relation(fromDetail: task.detail))
             try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
             await refreshLists()
             let outcome = await automationRunner.run(
-                task: task, settings: settings, trigger: trigger)
+                task: task, settings: settings, trigger: trigger, labelRule: rule)
             let success =
-                trigger == .label
-                ? "\(task.title) を \(settings.label) で実行しました"
-                : "\(task.title) の生成物ができました"
+                rule.map { "\(task.title) を \($0.label) で実行しました" }
+                ?? "\(task.title) の生成物ができました"
             await finishRun(run, task: task, outcome: outcome, success: success)
         }
     }

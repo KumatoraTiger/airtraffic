@@ -57,13 +57,16 @@ public actor AutomationRunner {
     /// Runs the command for one task. Never throws: every failure is an
     /// `Outcome.failed` carrying a line the board can show.
     ///
-    /// `trigger` says which of the three command lines runs; `event` carries
-    /// the review comment's own values, and is only passed with `.comment`.
-    /// All three write into the same per-task directory, so a row keeps one
-    /// folder however many times it ran.
+    /// `trigger` says which command line runs; `event` carries the review
+    /// comment's own values and is only passed with `.comment`, while
+    /// `labelRule` carries the label's own command line and is only passed
+    /// with `.label` — since that trigger now holds a list of rules, the
+    /// settings alone no longer say which one fired. All of them write into
+    /// the same per-task directory, so a row keeps one folder however many
+    /// times it ran.
     public func run(
         task: TaskItem, settings: AutomationSettings, trigger: AutomationTrigger = .arrival,
-        event: CommentEvent? = nil
+        event: CommentEvent? = nil, labelRule: LabelRule? = nil
     ) -> Outcome {
         let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id)
         do {
@@ -79,7 +82,9 @@ public actor AutomationRunner {
             switch trigger {
             case .arrival: settings.commandLine
             case .comment: settings.commentCommandLine
-            case .label: settings.labelCommandLine
+            // Nothing to fall back on: a label run without its rule is a
+            // caller bug, and an empty command line is refused just below.
+            case .label: labelRule?.commandLine ?? ""
             }
         let arguments = TaskAutomation.arguments(
             commandLine: commandLine, values: values)

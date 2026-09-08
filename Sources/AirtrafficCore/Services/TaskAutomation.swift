@@ -11,6 +11,36 @@ public enum AutomationState: String, Codable, Sendable {
     case failed
 }
 
+/// One "this label runs this command" pair.
+///
+/// The label trigger holds a list of these rather than a single label and a
+/// single command, so one issue tracker can drive several jobs: `improve`
+/// sharpens the issue, `implement` writes the code, and each names its own
+/// wrapper.
+///
+/// The `id` exists for the settings screen, which edits the rules in place;
+/// it is persisted with them so a row keeps its identity across launches.
+public struct LabelRule: Identifiable, Codable, Sendable, Equatable {
+    public var id: UUID
+    /// The label that fires it, by name. Empty means this rule fires nothing.
+    public var label: String
+    /// Executable and arguments, split like a shell would but never run
+    /// through one. See `TaskAutomation.tokenize`.
+    public var commandLine: String
+
+    public init(id: UUID = UUID(), label: String = "", commandLine: String = "") {
+        self.id = id
+        self.label = label
+        self.commandLine = commandLine
+    }
+
+    /// Whether this rule can start anything: both halves have to be filled in.
+    public var isUsable: Bool {
+        !label.trimmingCharacters(in: .whitespaces).isEmpty
+            && !TaskAutomation.tokenize(commandLine).isEmpty
+    }
+}
+
 /// How the per-task command is configured.
 ///
 /// Repositories are opted IN here, unlike the inbox's opt-out list. The inbox
@@ -43,12 +73,14 @@ public struct AutomationSettings: Sendable, Equatable {
     /// Whether a label put on an issue assigned to the user fires a command.
     /// Off by default, like everything that starts a process.
     public var labelTrigger: Bool
-    /// The label that fires it, by name. Empty means nothing fires.
-    public var label: String
-    /// The command that label fires. Separate from the other two because the
-    /// job is a third one: implementing an issue, not reading work that just
-    /// arrived and not answering a review.
-    public var labelCommandLine: String
+    /// The labels that fire a command, each with the command it fires, in the
+    /// order the user put them in. An issue carrying two of them runs the
+    /// first: a row runs once, so the list is also the priority.
+    ///
+    /// Separate command lines from the arrival and comment ones because the
+    /// jobs differ — sharpening an issue, implementing it, answering a review
+    /// are three different wrappers, and now the first two can be several.
+    public var labelRules: [LabelRule]
 
     public init(
         enabled: Bool = false,
@@ -60,8 +92,7 @@ public struct AutomationSettings: Sendable, Equatable {
         commentCommandLine: String = "",
         commentDailyLimit: Int = 3,
         labelTrigger: Bool = false,
-        label: String = "",
-        labelCommandLine: String = ""
+        labelRules: [LabelRule] = []
     ) {
         self.enabled = enabled
         self.relations = relations
@@ -72,8 +103,7 @@ public struct AutomationSettings: Sendable, Equatable {
         self.commentCommandLine = commentCommandLine
         self.commentDailyLimit = commentDailyLimit
         self.labelTrigger = labelTrigger
-        self.label = label
-        self.labelCommandLine = labelCommandLine
+        self.labelRules = labelRules
     }
 }
 

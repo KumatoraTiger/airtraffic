@@ -82,13 +82,16 @@ The setting is off by default and does nothing until you also tick the
 repositories it may run for.
 
 Two more triggers share that command runner, that repository list and that
-working directory, each with a command line of its own:
+working directory, each with command lines of its own:
 
-- **A label on an assigned issue.** Name a label (`ai`, say) and Airtraffic
-  runs your command once for every open issue assigned to you that carries it
-  — the way to hand an issue to a coding agent is then to label it on GitHub.
-  It runs once per issue; to run it again, right-click the row in the board's
-  自動実行 section and choose 「もう一度動けるようにする」.
+- **A label on an assigned issue.** Name as many labels as you have jobs, each
+  with its own command line — `improve` to sharpen an issue, `implement` to
+  write it — and Airtraffic runs the matching command once for every open
+  issue assigned to you that carries one of them. Labelling on GitHub is then
+  how you hand an issue to a particular agent. An issue wearing two of your
+  labels runs the rule listed first, since a row runs once; to run it again,
+  right-click the row in the board's 自動実行 section and choose
+  「もう一度動けるようにする」.
 - **A bot's review on your own pull request.** Runs once per batch of review
   comments, after the pull request's checks have finished, bounded by a daily
   limit per pull request so a bot and an agent cannot push each other back and

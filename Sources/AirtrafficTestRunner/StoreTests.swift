@@ -250,6 +250,28 @@ struct StoreTests {
             expectEqual(runs.last?.triggerLabel, "新着")
         }
 
+        await TestKit.shared.run("store: a label run remembers which label fired it") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "ghl:gh:alex/demo#7@2", taskId: "gh:alex/demo#7", title: "issue #7 直す",
+                    trigger: .label, matchedLabel: "improve",
+                    startedAt: Date(timeIntervalSince1970: 2_000), relation: .assigned))
+            // A row from the build that had one label and no column for it.
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "ghl:gh:alex/demo#8@1", taskId: "gh:alex/demo#8", title: "issue #8 足す",
+                    trigger: .label, startedAt: Date(timeIntervalSince1970: 1_000),
+                    relation: .assigned))
+
+            let runs = try await store.automationRuns()
+            expectEqual(runs.first?.matchedLabel, "improve")
+            expectEqual(runs.first?.triggerLabel, "improve")
+            expectEqual(runs.last?.matchedLabel, nil)
+            expectEqual(runs.last?.triggerLabel, "ラベル")
+        }
+
         await TestKit.shared.run("store: a pruned output directory is cleared off the rows") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

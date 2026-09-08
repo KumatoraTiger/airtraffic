@@ -47,10 +47,18 @@ struct AutomationTests {
         enabled: Bool = true, labelTrigger: Bool = true, label: String = "ai",
         labelCommand: String = "/usr/bin/true {url}", repos: Set<String> = ["alex/demo"]
     ) -> AutomationSettings {
+        labelSettings(
+            enabled: enabled, labelTrigger: labelTrigger, repos: repos,
+            rules: [LabelRule(label: label, commandLine: labelCommand)])
+    }
+
+    private func labelSettings(
+        enabled: Bool = true, labelTrigger: Bool = true, repos: Set<String> = ["alex/demo"],
+        rules: [LabelRule]
+    ) -> AutomationSettings {
         AutomationSettings(
             enabled: enabled, relations: [.reviewRequested], commandLine: "/usr/bin/true {url}",
-            allowedRepos: repos, labelTrigger: labelTrigger, label: label,
-            labelCommandLine: labelCommand)
+            allowedRepos: repos, labelTrigger: labelTrigger, labelRules: rules)
     }
 
     private func comment(
@@ -409,7 +417,7 @@ struct AutomationTests {
             let task = issueTask()
             let planned = LabelTrigger.plan(
                 tasks: [task], labels: [task.id: ["bug", "ai"]], settings: labelSettings())
-            expectEqual(planned.map(\.id), [task.id])
+            expectEqual(planned.map(\.task.id), [task.id])
 
             // The state written before the command starts is what stops the
             // next pass from starting it again.
@@ -464,6 +472,55 @@ struct AutomationTests {
                 "a pull request row never fires the label trigger")
         }
 
+        await kit.run("each label runs the command its own rule names") {
+            let improve = LabelRule(label: "improve", commandLine: "/usr/bin/true improve")
+            let implement = LabelRule(label: "implement", commandLine: "/usr/bin/true implement")
+            let settings = labelSettings(rules: [improve, implement])
+            let first = issueTask(number: 21)
+            let second = issueTask(number: 22)
+            let planned = LabelTrigger.plan(
+                tasks: [first, second],
+                labels: [first.id: ["bug", "improve"], second.id: ["implement"]],
+                settings: settings)
+            expectEqual(planned.map(\.task.id), [first.id, second.id])
+            expectEqual(planned.map(\.rule.commandLine), [improve.commandLine, implement.commandLine])
+        }
+
+        await kit.run("an issue wearing two of the labels runs the rule listed first") {
+            let improve = LabelRule(label: "improve", commandLine: "/usr/bin/true improve")
+            let implement = LabelRule(label: "implement", commandLine: "/usr/bin/true implement")
+            let task = issueTask(number: 23)
+            let labels = [task.id: ["implement", "improve"]]
+            // The order of the LABELS on the issue says nothing; the order of
+            // the rules is the one the user can see and change.
+            expectEqual(
+                LabelTrigger.plan(
+                    tasks: [task], labels: labels, settings: labelSettings(rules: [improve, implement])
+                ).first?.rule.label, "improve")
+            expectEqual(
+                LabelTrigger.plan(
+                    tasks: [task], labels: labels, settings: labelSettings(rules: [implement, improve])
+                ).first?.rule.label, "implement")
+        }
+
+        await kit.run("a half-written rule fires nothing and does not shadow the next one") {
+            let empty = LabelRule(label: "", commandLine: "/usr/bin/true nothing")
+            let commandless = LabelRule(label: "improve", commandLine: "   ")
+            let usable = LabelRule(label: "improve", commandLine: "/usr/bin/true improve")
+            expect(!empty.isUsable && !commandless.isUsable && usable.isUsable, "isUsable")
+            let task = issueTask(number: 24)
+            let planned = LabelTrigger.plan(
+                tasks: [task], labels: [task.id: ["improve"]],
+                settings: labelSettings(rules: [empty, commandless, usable]))
+            expectEqual(planned.first?.rule.commandLine, usable.commandLine)
+            expect(
+                LabelTrigger.plan(
+                    tasks: [task], labels: [task.id: ["improve"]],
+                    settings: labelSettings(rules: [empty, commandless])
+                ).isEmpty,
+                "rules that cannot run leave the trigger off")
+        }
+
         await kit.run("the label trigger stays off without its switch, label or command") {
             let task = issueTask()
             let labels = [task.id: ["ai"]]
@@ -472,6 +529,7 @@ struct AutomationTests {
                 labelSettings(labelTrigger: false),
                 labelSettings(label: ""),
                 labelSettings(labelCommand: "   "),
+                labelSettings(rules: []),
             ] {
                 expect(
                     LabelTrigger.plan(tasks: [task], labels: labels, settings: settings).isEmpty,
@@ -496,13 +554,14 @@ struct AutomationTests {
             let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id).path
             // The arrival command writes nothing, so only the label command
             // can be what produced the file.
+            let rule = LabelRule(
+                label: "ai", commandLine: "/bin/sh -c 'echo done > \"$0/実装.md\"' {outDir}")
             let settings = AutomationSettings(
                 enabled: true, commandLine: "/bin/sh -c 'exit 0'", workingDirectory: "/tmp",
-                allowedRepos: ["alex/demo"], labelTrigger: true, label: "ai",
-                labelCommandLine: "/bin/sh -c 'echo done > \"$0/実装.md\"' {outDir}")
+                allowedRepos: ["alex/demo"], labelTrigger: true, labelRules: [rule])
 
             expectEqual(
-                await runner.run(task: task, settings: settings, trigger: .label),
+                await runner.run(task: task, settings: settings, trigger: .label, labelRule: rule),
                 .produced(directory))
             expect(
                 FileManager.default.fileExists(atPath: directory + "/実装.md"),
@@ -530,14 +589,22 @@ struct AutomationTests {
         await kit.run("the label and comment triggers keep their own badge") {
             let labelled = AutomationRun(
                 id: "ghl:1", taskId: "gh:alex/demo#7", title: "issue #7 転送を速くする",
-                trigger: .label, startedAt: Date(), relation: .assigned)
+                trigger: .label, matchedLabel: "improve", startedAt: Date(), relation: .assigned)
             let commented = AutomationRun(
                 id: "ghc:1", taskId: "gh:alex/demo#8", title: "PR #8 転送を速くする",
                 trigger: .comment, author: "coderabbitai[bot]", startedAt: Date(),
                 relation: .authored)
             // The relation is always 担当 issue for a label and 自分の PR for a
             // comment, so naming it would say nothing the trigger does not.
-            expectEqual(labelled.triggerLabel, "ラベル")
+            // The label itself is the news, now that several of them can each
+            // name a different command.
+            expectEqual(labelled.triggerLabel, "improve")
+            // A run written before the rules became a list names no label.
+            expectEqual(
+                AutomationRun(
+                    id: "ghl:0", taskId: "gh:alex/demo#7", title: "issue #7", trigger: .label,
+                    startedAt: Date()
+                ).triggerLabel, "ラベル")
             expectEqual(commented.triggerLabel, "Bot レビュー")
         }
 
