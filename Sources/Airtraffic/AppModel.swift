@@ -508,6 +508,12 @@ final class AppModel {
                 relation: GitHubTaskSync.relation(fromDetail: task.detail))
             try? await store.recordAutomationRun(run)
             try? await store.setAutomation(taskId: task.id, state: .running)
+            // Written before the command starts, like the state: the label
+            // trigger reads this to know which rules are spent, and a crash
+            // mid-run must not offer this one again.
+            if let rule {
+                try? await store.recordAutomationLabel(taskId: task.id, label: rule.label)
+            }
             await refreshLists()
             let outcome = await automationRunner.run(
                 task: task, settings: settings, trigger: trigger, labelRule: rule)
@@ -595,10 +601,15 @@ final class AppModel {
 
     /// Clears one row's result so the command can run again, for the case
     /// where it failed for a reason the user has since fixed.
+    ///
+    /// The labels it already ran are forgotten too: this is the gesture for
+    /// "run it again", and a label the trigger still considers spent would
+    /// make it do nothing.
     func resetAutomation(taskId: String) async {
         guard let store else { return }
         await automationRunner.discard(taskId: taskId)
         try? await store.setAutomation(taskId: taskId, state: nil)
+        try? await store.setAutomationLabels(taskId: taskId, labels: [])
         await refreshLists()
     }
 

@@ -11,8 +11,10 @@ import Foundation
 ///
 /// The user names as many labels as they have jobs, each carrying its own
 /// command line ([[LabelRule]]) — `improve` for an issue that needs
-/// sharpening, `implement` for one ready to be written. An issue wearing two
-/// of them runs the first rule in the list, because a row runs once.
+/// sharpening, `implement` for one ready to be written. Each rule runs once
+/// per issue, so the two labels are two jobs whether they arrive together or
+/// weeks apart; an issue wearing both at once runs the first rule in the list
+/// now and the second on the next pass.
 ///
 /// Pure like the other two: which rows qualify is decided without touching
 /// the network, the store, or a process.
@@ -47,16 +49,22 @@ public enum LabelTrigger {
         }
     }
 
-    /// The first rule an issue's labels satisfy, or nil when they satisfy
-    /// none.
+    /// The first rule an issue's labels satisfy and whose command has not run
+    /// for it yet, or nil when there is none.
     ///
-    /// First, not "best": a row runs once, so two labels on one issue have to
-    /// be resolved somehow, and the order the user wrote the rules in is the
-    /// one thing they can see and change. A rule missing its label or its
-    /// command is skipped rather than matched — half a rule fires nothing.
-    public static func rule(labels: [String], rules: [LabelRule]) -> LabelRule? {
+    /// First, not "best": one pass starts one command per row, so two fresh
+    /// labels on one issue have to be resolved somehow, and the order the
+    /// user wrote the rules in is the one thing they can see and change. The
+    /// other one is picked up by the next pass. A rule missing its label or
+    /// its command is skipped rather than matched — half a rule fires
+    /// nothing.
+    ///
+    /// `ran` is the labels this row already ran, compared the same way the
+    /// labels themselves are.
+    public static func rule(labels: [String], rules: [LabelRule], ran: [String] = []) -> LabelRule? {
         rules.first { rule in
             rule.isUsable && matches(labels: labels, label: rule.label)
+                && !matches(labels: ran, label: rule.label)
         }
     }
 
@@ -69,11 +77,16 @@ public enum LabelTrigger {
     /// label that could not be read must never look like a label that is
     /// there.
     ///
-    /// A row qualifies once. `automationState` is what stops the next pass
-    /// from running the same command again, failures included, so a second
-    /// run needs the board's 「もう一度動けるようにする」 like the other triggers.
-    /// That also means adding a second label to an issue one rule already ran
-    /// for changes nothing until the row is reset.
+    /// Each RULE qualifies once per row, and `automationLabels` is what says
+    /// which ones are spent — failures included, so running the same label
+    /// again needs the board's 「もう一度動けるようにする」 like the other
+    /// triggers. Labelling an issue `improve` and, once that has run,
+    /// `implement`, therefore runs both: the second label is a second job,
+    /// not a repeat of the first. (Until 2026-09-10 the row's
+    /// `automationState` held it back, so the second label did nothing.)
+    ///
+    /// `automationState` still matters in one way: a row whose command is
+    /// running is left alone, because one row runs one command at a time.
     public static func plan(
         tasks: [TaskItem], labels: [String: [String]], settings: AutomationSettings,
         limit: Int = runLimit
@@ -85,7 +98,7 @@ public enum LabelTrigger {
         guard rules.contains(where: \.isUsable) else { return [] }
         return Array(
             tasks.compactMap { task -> Match? in
-                guard task.source == .github, task.automationState == nil else { return nil }
+                guard task.source == .github, task.automationState != .running else { return nil }
                 guard task.status != .archived, task.status != .done else { return nil }
                 // Only issues assigned to the user: the label is read off the
                 // assigned search, and that is the only search this app asks
@@ -95,9 +108,10 @@ public enum LabelTrigger {
                 }
                 guard let reference = GitHubItem.reference(taskId: task.id) else { return nil }
                 guard settings.allowedRepos.contains(reference.repo) else { return nil }
-                guard let rule = rule(labels: labels[task.id] ?? [], rules: rules) else {
-                    return nil
-                }
+                guard
+                    let rule = rule(
+                        labels: labels[task.id] ?? [], rules: rules, ran: task.automationLabels)
+                else { return nil }
                 return Match(task: task, rule: rule)
             }
             .prefix(limit))

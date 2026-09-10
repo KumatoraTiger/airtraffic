@@ -30,7 +30,7 @@ struct AutomationTests {
     /// ever fires on.
     private func issueTask(
         repo: String = "alex/demo", number: Int = 12, state: AutomationState? = nil,
-        status: TaskStatus = .todo
+        ran: [String] = [], status: TaskStatus = .todo
     ) -> TaskItem {
         let item = GitHubItem(
             repo: repo, number: number, title: "検索を速くする",
@@ -40,7 +40,7 @@ struct AutomationTests {
             id: item.taskId, title: GitHubTaskSync.title(for: item),
             detail: GitHubTaskSync.detail(for: item), status: status, rank: nil,
             source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [],
-            automationState: state)
+            automationState: state, automationLabels: ran)
     }
 
     private func labelSettings(
@@ -419,21 +419,69 @@ struct AutomationTests {
                 tasks: [task], labels: [task.id: ["bug", "ai"]], settings: labelSettings())
             expectEqual(planned.map(\.task.id), [task.id])
 
-            // The state written before the command starts is what stops the
+            // The label written before the command starts is what stops the
             // next pass from starting it again.
-            let ran = issueTask(state: .done)
+            let ran = issueTask(state: .done, ran: ["ai"])
             expect(
                 LabelTrigger.plan(
                     tasks: [ran], labels: [ran.id: ["ai"]], settings: labelSettings()
                 ).isEmpty,
-                "a row that already ran never runs again")
-            let failed = issueTask(state: .failed)
+                "a label that already ran never runs again")
+            let failed = issueTask(state: .failed, ran: ["ai"])
             expect(
                 LabelTrigger.plan(
                     tasks: [failed], labels: [failed.id: ["ai"]], settings: labelSettings()
                 )
                 .isEmpty,
-                "a failed row waits for a manual reset")
+                "a failed label waits for a manual reset")
+            // Spelled differently on the issue than in the rule, and still
+            // the same spent label.
+            let cased = issueTask(state: .done, ran: [" AI "])
+            expect(
+                LabelTrigger.plan(
+                    tasks: [cased], labels: [cased.id: ["ai"]], settings: labelSettings()
+                ).isEmpty,
+                "a spent label is matched like any other")
+            // One command per row at a time: a row mid-run is left alone even
+            // when it carries a label nothing has run yet.
+            let running = issueTask(state: .running)
+            expect(
+                LabelTrigger.plan(
+                    tasks: [running], labels: [running.id: ["ai"]], settings: labelSettings()
+                ).isEmpty,
+                "a row whose command is running waits")
+        }
+
+        await kit.run("a label added after another one ran still fires") {
+            let improve = LabelRule(label: "improve", commandLine: "/usr/bin/true improve")
+            let implement = LabelRule(label: "implement", commandLine: "/usr/bin/true implement")
+            let settings = labelSettings(rules: [improve, implement])
+            // The row improve already ran for, now wearing implement too —
+            // the case that did nothing until 2026-09-10. Its state is `done`
+            // because the earlier run finished, and that no longer holds the
+            // second rule back.
+            let task = issueTask(number: 31, state: .done, ran: ["improve"])
+            let planned = LabelTrigger.plan(
+                tasks: [task], labels: [task.id: ["improve", "implement"]], settings: settings)
+            expectEqual(planned.map(\.rule.label), ["implement"])
+
+            // Both spent: nothing left to run, whatever the labels say.
+            let spent = issueTask(number: 32, state: .done, ran: ["improve", "implement"])
+            expect(
+                LabelTrigger.plan(
+                    tasks: [spent], labels: [spent.id: ["improve", "implement"]],
+                    settings: settings
+                ).isEmpty,
+                "every rule has had its turn")
+
+            // A row an arrival or comment run touched has run no label, so a
+            // label put on it now is its first.
+            let elsewhere = issueTask(number: 33, state: .failed)
+            expectEqual(
+                LabelTrigger.plan(
+                    tasks: [elsewhere], labels: [elsewhere.id: ["implement"]], settings: settings
+                ).map(\.rule.label),
+                ["implement"])
         }
 
         await kit.run("the label is matched whatever its case and spacing") {

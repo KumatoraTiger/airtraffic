@@ -161,6 +161,11 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
     /// Whether the per-task command already ran for this row, and how it went.
     /// Nil means it never ran, which is the only state that lets it start.
     public var automationState: AutomationState?
+    /// The labels whose rule already ran for this row, written before each
+    /// label command starts. The label trigger runs each rule once per issue
+    /// and reads this to know which ones are spent, so a second label put on
+    /// an issue after the first one ran still fires.
+    public var automationLabels: [String]
     /// The directory that command wrote into, opened from the board in the
     /// Finder. Rows written by an earlier build hold a single file instead.
     public var artifactPath: String?
@@ -169,7 +174,8 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         id: String, title: String, detail: String, status: TaskStatus, rank: Int?,
         isToday: Bool = false, source: TaskSource, createdAt: Date, updatedAt: Date,
         completedAt: Date? = nil, parentId: String? = nil, sessionIds: [String],
-        automationState: AutomationState? = nil, artifactPath: String? = nil
+        automationState: AutomationState? = nil, automationLabels: [String] = [],
+        artifactPath: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -184,6 +190,7 @@ public struct TaskItem: Identifiable, Hashable, Sendable {
         self.parentId = parentId
         self.sessionIds = sessionIds
         self.automationState = automationState
+        self.automationLabels = automationLabels
         self.artifactPath = artifactPath
     }
 

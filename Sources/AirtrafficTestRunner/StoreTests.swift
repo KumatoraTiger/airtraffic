@@ -295,6 +295,31 @@ struct StoreTests {
             expectEqual(try await store.automationRuns().first?.artifactPath, nil)
         }
 
+        await TestKit.shared.run("store: the labels a row already ran are remembered") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let task = TaskItem(
+                id: "gh:alex/demo#7", title: "issue #7 直す", detail: "", status: .todo, rank: nil,
+                source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [])
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.automationLabels, [])
+
+            try await store.recordAutomationLabel(taskId: task.id, label: "improve")
+            try await store.recordAutomationLabel(taskId: task.id, label: "implement")
+            // The same label again, spelled the way GitHub spells it: still
+            // one entry, so a reset-and-rerun cannot double the list up.
+            try await store.recordAutomationLabel(taskId: task.id, label: " Improve ")
+            expectEqual(try await store.tasks().first?.automationLabels, ["improve", "implement"])
+
+            // The GitHub pass rewrites the row on every scan and must not
+            // carry the list away with it.
+            try await store.upsertTask(task)
+            expectEqual(try await store.tasks().first?.automationLabels, ["improve", "implement"])
+
+            try await store.setAutomationLabels(taskId: task.id, labels: [])
+            expectEqual(try await store.tasks().first?.automationLabels, [])
+        }
+
         await TestKit.shared.run("store: runs still running at launch are marked interrupted") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

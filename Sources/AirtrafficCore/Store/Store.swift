@@ -46,8 +46,9 @@ public actor Store {
         try Self.migrateTaskIsToday(db)
         try Self.migrateTaskCompletedAt(db)
         try Self.migrateTaskParentId(db)
-        try Self.migrateTaskAutomation(db)
+        let labelsAreNew = try Self.migrateTaskAutomation(db)
         try Self.migrateAutomationRuns(db)
+        if labelsAreNew { try Self.backfillAutomationLabels(db) }
         try db.execute(
             """
             CREATE TABLE IF NOT EXISTS preferences (
@@ -153,7 +154,11 @@ public actor Store {
 
     /// Adds the automation columns behind the per-task command. Existing
     /// tasks have no state, which is exactly "never ran".
-    private static func migrateTaskAutomation(_ db: SQLiteDatabase) throws {
+    ///
+    /// Answers whether `automation_labels` was added by this call, which is
+    /// the signal to backfill it from the run history once that table exists.
+    @discardableResult
+    private static func migrateTaskAutomation(_ db: SQLiteDatabase) throws -> Bool {
         let columns = try db.query("PRAGMA table_info(tasks)").map { $0.text("name") }
         if !columns.contains("automation_state") {
             try db.execute("ALTER TABLE tasks ADD COLUMN automation_state TEXT")
@@ -161,6 +166,55 @@ public actor Store {
         if !columns.contains("artifact_path") {
             try db.execute("ALTER TABLE tasks ADD COLUMN artifact_path TEXT")
         }
+        // Which labels already had their rule run, as a JSON array. A row
+        // written before this column answers nil, which reads as "no label
+        // ran yet" — so the column is backfilled from the run history, which
+        // has recorded the label of every label run since 2026-09-08.
+        if !columns.contains("automation_labels") {
+            try db.execute("ALTER TABLE tasks ADD COLUMN automation_labels TEXT")
+            return true
+        }
+        return false
+    }
+
+    /// Fills `tasks.automation_labels` from the label runs already recorded,
+    /// once, when the column is first added.
+    ///
+    /// Without it the upgrade would run every rule again: the old build held
+    /// a labelled issue back with `automation_state`, and the new one reads
+    /// this column instead. A run from before `matched_label` existed names
+    /// no label and is skipped — it is 30 days old at most, and guessing
+    /// which rule it was is worse than the issue running once more.
+    private static func backfillAutomationLabels(_ db: SQLiteDatabase) throws {
+        let rows = try db.query(
+            """
+            SELECT DISTINCT task_id, matched_label FROM automation_runs
+            WHERE trigger = 'label' AND matched_label IS NOT NULL
+            """)
+        var byTask: [String: [String]] = [:]
+        for row in rows {
+            byTask[row.text("task_id"), default: []].append(row.text("matched_label"))
+        }
+        for (taskId, labels) in byTask {
+            try db.execute(
+                "UPDATE tasks SET automation_labels = ? WHERE id = ?",
+                [.text(encodeAutomationLabels(labels)), .text(taskId)])
+        }
+    }
+
+    /// The stored form of the label list: a JSON array, so a label carrying a
+    /// comma or a space needs no escaping rule of its own.
+    static func encodeAutomationLabels(_ labels: [String]) -> String {
+        let data = (try? JSONEncoder().encode(labels)) ?? Data("[]".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Reads that list back. Anything unreadable is an empty list rather than
+    /// a crash: a row that cannot say which labels ran is a row that may run
+    /// one again, which is the recoverable direction.
+    static func decodeAutomationLabels(_ text: String?) -> [String] {
+        guard let text, let data = text.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
     }
 
     // MARK: - Cursors
@@ -209,6 +263,8 @@ public actor Store {
                 sessionIds: sessionsByTask[row.text("id")] ?? [],
                 automationState: row.textOrNil("automation_state")
                     .flatMap(AutomationState.init(rawValue:)),
+                automationLabels: Self.decodeAutomationLabels(
+                    row.textOrNil("automation_labels")),
                 artifactPath: row.textOrNil("artifact_path")
             )
         }
@@ -253,6 +309,33 @@ public actor Store {
             [
                 state.map { .text($0.rawValue) } ?? .null,
                 artifactPath.map { .text($0) } ?? .null,
+                .text(taskId),
+            ])
+    }
+
+    /// Remembers that one label's rule ran for this row, so the label trigger
+    /// stops offering it and starts offering the ones that have not run.
+    ///
+    /// Written before the command starts, like `setAutomation`: a crash
+    /// mid-run has to read as "already handled". Adding a label already in
+    /// the list changes nothing, so a reset-and-rerun does not double it up.
+    public func recordAutomationLabel(taskId: String, label: String) throws {
+        let stored = try db.query(
+            "SELECT automation_labels FROM tasks WHERE id = ?", [.text(taskId)])
+        guard let row = stored.first else { return }
+        var labels = Self.decodeAutomationLabels(row.textOrNil("automation_labels"))
+        guard !LabelTrigger.matches(labels: labels, label: label) else { return }
+        labels.append(label)
+        try setAutomationLabels(taskId: taskId, labels: labels)
+    }
+
+    /// Replaces the list outright. The board's reset passes an empty one, and
+    /// that is what lets an issue run the same label a second time.
+    public func setAutomationLabels(taskId: String, labels: [String]) throws {
+        try db.execute(
+            "UPDATE tasks SET automation_labels = ? WHERE id = ?",
+            [
+                labels.isEmpty ? .null : .text(Self.encodeAutomationLabels(labels)),
                 .text(taskId),
             ])
     }
@@ -394,6 +477,7 @@ public actor Store {
         try upsertTask(task)
         try setAutomation(
             taskId: task.id, state: task.automationState, artifactPath: task.artifactPath)
+        try setAutomationLabels(taskId: task.id, labels: task.automationLabels)
     }
 
     /// Removes a task row and its session links, for undoing a task an action
