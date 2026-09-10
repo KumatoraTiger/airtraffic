@@ -46,6 +46,15 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
     public var trigger: AutomationTrigger
     /// Login of the bot whose review fired a `.comment` run.
     public var author: String?
+    /// Link to the review comment that fired a `.comment` run.
+    ///
+    /// Stored because a run now waits in a queue that outlives the process
+    /// that planned it: the comment's own values are what `{commentUrl}` and
+    /// `{author}` are filled from, and after a restart there is nothing else
+    /// left to read them off. Nil for every other trigger, and for a comment
+    /// run written before the queue existed — such a row cannot be started
+    /// again, only read as history.
+    public var commentUrl: String?
     /// The label that fired a `.label` run, as the rule spells it. Nil for
     /// every other trigger, and for a label run an older build wrote — back
     /// when there was only one label to name.
@@ -65,7 +74,8 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
 
     public init(
         id: String, taskId: String, title: String, url: String? = nil,
-        trigger: AutomationTrigger, author: String? = nil, matchedLabel: String? = nil,
+        trigger: AutomationTrigger, author: String? = nil, commentUrl: String? = nil,
+        matchedLabel: String? = nil,
         startedAt: Date, finishedAt: Date? = nil, state: AutomationState = .running,
         reason: String? = nil, artifactPath: String? = nil, relation: GitHubRelation? = nil
     ) {
@@ -75,6 +85,7 @@ public struct AutomationRun: Identifiable, Sendable, Equatable {
         self.url = url
         self.trigger = trigger
         self.author = author
+        self.commentUrl = commentUrl
         self.matchedLabel = matchedLabel
         self.startedAt = startedAt
         self.finishedAt = finishedAt

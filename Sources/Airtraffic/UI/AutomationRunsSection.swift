@@ -6,11 +6,14 @@ import SwiftUI
 /// background right now, and what it did over the last day.
 ///
 /// One row per run. The leading symbol answers the only question that
-/// matters at a glance — running, done, or failed — and the rest of the row
-/// says what fired it (a new row, or a bot's review), on which pull request,
-/// how long ago, and why it failed when it did. Kept above the task list on
-/// purpose: an agent working unattended on the user's behalf is the thing
-/// they most want to know about when they glance at the window.
+/// matters at a glance — waiting, running, done, or failed — and the rest of
+/// the row says what fired it (a new row, or a bot's review), on which pull
+/// request, how long ago, and why it failed when it did. Kept above the task
+/// list on purpose: an agent working unattended on the user's behalf is the
+/// thing they most want to know about when they glance at the window.
+///
+/// The app starts one command at a time by itself; a waiting row carries a
+/// play button, so the user decides when to spend the rest of the ceiling.
 struct AutomationRunsSection: View {
     @Environment(AppModel.self) private var model
 
@@ -36,18 +39,29 @@ struct AutomationRunsSection: View {
         }
     }
 
-    /// Running runs first, then the newest finished ones from the last day.
+    /// Running runs first, then the queue in the order it will drain, then
+    /// the newest finished ones from the last day.
     private var runs: [AutomationRun] {
         let displayed = model.automationRuns.filter { $0.isDisplayed() }
         let running = displayed.filter { $0.state == .running }
-        let finished = displayed.filter { $0.state != .running }.prefix(Self.finishedLimit)
-        return running + finished
+        let waiting = AutomationQueue.waiting(displayed)
+        let finished =
+            displayed
+            .filter { $0.state != .running && $0.state != .queued }
+            .prefix(Self.finishedLimit)
+        return running + waiting + finished
     }
 
     private var runningCount: Int { runs.filter { $0.state == .running }.count }
+    private var waitingCount: Int { runs.filter { $0.state == .queued }.count }
 
+    /// Says what is happening before it says how much there is: how many
+    /// commands are alive, and how many rows are still owed one.
     private var headerTitle: String {
-        runningCount > 0 ? "自動実行 (\(runningCount) 件 実行中)" : "自動実行 (\(runs.count))"
+        var parts: [String] = []
+        if runningCount > 0 { parts.append("\(runningCount) 件 実行中") }
+        if waitingCount > 0 { parts.append("\(waitingCount) 件 待機") }
+        return parts.isEmpty ? "自動実行 (\(runs.count))" : "自動実行 (\(parts.joined(separator: ", ")))"
     }
 }
 
@@ -73,6 +87,7 @@ struct AutomationRunRow: View {
                         .help("GitHub で開く")
                 }
                 Spacer()
+                if run.state == .queued { startButton }
                 // Fixed for the same reason as the badge: left to compress,
                 // a finish time breaks into a column of single characters and
                 // drags the whole row's height with it.
@@ -106,7 +121,11 @@ struct AutomationRunRow: View {
         }
         .padding(.vertical, 3)
         .contextMenu {
-            if run.state != .running, taskOnBoard {
+            if run.state == .queued {
+                Button("いま実行する") { model.startQueuedRun(run) }
+                    .disabled(model.automationBlock(for: run) != nil)
+                Button("待機をやめる") { Task { await model.cancelQueuedRun(run) } }
+            } else if run.state != .running, taskOnBoard {
                 Button("もう一度動けるようにする") {
                     Task { await model.resetAutomation(taskId: run.taskId) }
                 }
@@ -114,10 +133,33 @@ struct AutomationRunRow: View {
         }
     }
 
-    /// Running, done, or failed — the one thing to read at a glance.
+    /// Starts a waiting row now, past the one-at-a-time pace the app keeps
+    /// for itself.
+    ///
+    /// Greyed out with the reason in its tooltip rather than hidden: "why can
+    /// I not start this one" is the question a disabled button answers and a
+    /// missing one does not.
+    private var startButton: some View {
+        let blocked = model.automationBlock(for: run)
+        return Image(systemName: "play.circle")
+            .font(.caption)
+            .foregroundStyle(blocked == nil ? Color.blue : Color.gray)
+            .instantClick("いま実行する") {
+                guard blocked == nil else { return }
+                model.startQueuedRun(run)
+            }
+            .help(blocked ?? "いま実行する")
+            .fixedSize()
+    }
+
+    /// Waiting, running, done, or failed — the one thing to read at a glance.
     @ViewBuilder
     private var stateSymbol: some View {
         switch run.state {
+        case .queued:
+            Image(systemName: "clock")
+                .foregroundStyle(.secondary)
+                .help("実行を待っています")
         case .running:
             ProgressView()
                 .controlSize(.mini)
@@ -197,6 +239,13 @@ struct AutomationRunRow: View {
     @ViewBuilder
     private var timing: some View {
         switch run.state {
+        case .queued:
+            HStack(spacing: 3) {
+                Text("待機")
+                Text(run.startedAt, style: .relative)
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
         case .running:
             HStack(spacing: 3) {
                 Text("開始")

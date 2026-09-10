@@ -202,6 +202,15 @@ final class AppModel {
     /// The board's 自動実行 section reads it; refreshed whenever a run starts
     /// or ends and once at launch.
     private(set) var automationRuns: [AutomationRun] = []
+    /// The runs THIS process started and has not finished, by run id → task
+    /// id. Only this process starts commands, so this is the whole truth about
+    /// what is alive right now: a `running` row left in the store by an
+    /// earlier launch is marked interrupted instead. What the board asks is
+    /// `automationBlock(for:)`, which reads this.
+    private var automationInFlight: [String: String] = [:]
+    /// Which of those the app started on its own, so the automatic lane stays
+    /// one wide however many the user starts by hand.
+    private var automaticRunIds: Set<String> = []
 
     var automationSettings: AutomationSettings {
         AutomationSettings(
@@ -270,7 +279,6 @@ final class AppModel {
     private var lastGitHubPass = Date.distantPast
     private var lastHousekeeping = Date.distantPast
     private var githubPassRunning = false
-    private var automationRunning = false
     /// The labels of the open issues the last GitHub pass read, by task id.
     /// Kept in memory only: it is what that one pass saw, and the next pass
     /// replaces it. Nothing runs from a stale answer, so nothing is stored.
@@ -451,114 +459,247 @@ final class AppModel {
 
     // MARK: - Per-task command
 
-    /// Runs the user's command once for each newly imported row it applies to.
+    /// Plans the rows whose command should run and puts them in the queue.
+    ///
+    /// Planning is no longer held back while something is running: the queue
+    /// is what bounds how many commands are alive, so a pass that finds work
+    /// during a long run records it instead of dropping it.
     func runAutomationPass() async {
-        guard let store, automationSettings.enabled, !automationRunning else { return }
+        guard let store, automationSettings.enabled else { return }
         let existing = (try? await store.tasks(includeArchived: true)) ?? []
-        await startRuns(
+        await enqueue(
             TaskAutomation.plan(tasks: existing, settings: automationSettings)
-                .map { ($0, nil) },
-            trigger: .arrival)
+                .map { PlannedRun(task: $0, trigger: .arrival) })
     }
 
     // MARK: - Label command
 
-    /// Runs the user's command once for each assigned issue carrying the label
-    /// they chose. The labels come from the GitHub pass that just ran; a pass
-    /// that could not read them starts nothing.
+    /// Queues the user's command once for each assigned issue carrying the
+    /// label they chose. The labels come from the GitHub pass that just ran; a
+    /// pass that could not read them plans nothing.
     func runIssueLabelPass() async {
         let settings = automationSettings
-        guard let store, settings.enabled, settings.labelTrigger, !automationRunning else {
-            return
-        }
+        guard let store, settings.enabled, settings.labelTrigger else { return }
         let existing = (try? await store.tasks(includeArchived: true)) ?? []
-        await startRuns(
+        await enqueue(
             LabelTrigger.plan(tasks: existing, labels: githubIssueLabels, settings: settings)
-                .map { ($0.task, $0.rule) },
-            trigger: .label)
+                .map { PlannedRun(task: $0.task, trigger: .label, rule: $0.rule) })
     }
 
-    /// Starts the planned rows one at a time.
+    /// One row the queue is about to accept, with whatever its trigger needs
+    /// to name a command line.
+    private struct PlannedRun {
+        var task: TaskItem
+        var trigger: AutomationTrigger
+        var rule: LabelRule?
+        var event: CommentEvent?
+    }
+
+    /// Writes the planned rows as queued runs. Nothing is started here.
     ///
-    /// Sequential on purpose, and the state is written before the command
-    /// starts: a crash mid-run leaves the row marked `running` rather than
-    /// eligible again, so nothing is started twice.
-    ///
-    /// Shared by the two triggers whose event is the row itself. The comment
-    /// trigger keeps its own loop: its runs are identified by the event, and
-    /// it has an author and a daily limit to report.
-    ///
-    /// A row carries the label rule that picked it up, which only a label run
-    /// has: the arrival trigger has one command line, so its rows pass nil.
-    private func startRuns(
-        _ planned: [(task: TaskItem, rule: LabelRule?)], trigger: AutomationTrigger
-    ) async {
+    /// The row's state and its spent label are written the moment it is
+    /// planned, exactly as they used to be written the moment it started: a
+    /// crash between planning and starting has to read as "already handled",
+    /// because the alternative is a coding agent started twice on the same
+    /// issue. What changed is only that "handled" now includes "waiting".
+    private func enqueue(_ planned: [PlannedRun]) async {
         guard let store, !planned.isEmpty else { return }
-        let settings = automationSettings
-        automationRunning = true
-        defer { automationRunning = false }
-        for (task, rule) in planned {
-            let now = Date()
+        let now = Date()
+        for item in planned {
+            let task = item.task
             let run = AutomationRun(
-                id: AutomationRun.startId(trigger: trigger, taskId: task.id, now: now),
+                id: item.event?.id
+                    ?? AutomationRun.startId(trigger: item.trigger, taskId: task.id, now: now),
                 taskId: task.id, title: task.title,
-                url: GitHubTaskSync.url(fromDetail: task.detail), trigger: trigger,
-                matchedLabel: rule?.label,
-                startedAt: now,
+                url: GitHubTaskSync.url(fromDetail: task.detail), trigger: item.trigger,
+                author: item.event?.author, commentUrl: item.event?.url,
+                matchedLabel: item.rule?.label,
+                startedAt: now, state: .queued,
                 relation: GitHubTaskSync.relation(fromDetail: task.detail))
             try? await store.recordAutomationRun(run)
-            try? await store.setAutomation(taskId: task.id, state: .running)
-            // Written before the command starts, like the state: the label
-            // trigger reads this to know which rules are spent, and a crash
-            // mid-run must not offer this one again.
-            if let rule {
+            // The folder an earlier run left is kept while this one waits:
+            // until the command starts there is nothing newer to point at.
+            try? await store.setAutomation(
+                taskId: task.id, state: .queued, artifactPath: task.artifactPath)
+            if let rule = item.rule {
                 try? await store.recordAutomationLabel(taskId: task.id, label: rule.label)
             }
-            await refreshLists()
-            let outcome = await automationRunner.run(
-                task: task, settings: settings, trigger: trigger, labelRule: rule)
-            let success =
-                rule.map { "\(task.title) を \($0.label) で実行しました" }
-                ?? "\(task.title) の生成物ができました"
-            await finishRun(run, task: task, outcome: outcome, success: success)
         }
+        let stamp = Date().formatted(date: .omitted, time: .shortened)
+        automationStatus = "\(stamp) \(planned.count) 件を実行待ちにしました"
+        await refreshLists()
+        pumpAutomationQueue()
     }
 
-    /// Writes how a run ended, to the run row and to the task, then tells the
-    /// settings screen in one line.
-    private func finishRun(
-        _ run: AutomationRun, task: TaskItem, outcome: AutomationRunner.Outcome, success: String
+    // MARK: - The queue
+
+    /// Starts the next queued run the app may start on its own.
+    ///
+    /// Called after every pass, after every run finishes, and once at launch,
+    /// so the queue drains without anybody watching it. One at a time, however
+    /// much of the ceiling is free: the rest of it is there for the runs the
+    /// user starts by hand, and an app that helped itself to all three would
+    /// leave them nothing to start.
+    private func pumpAutomationQueue() {
+        guard automationSettings.enabled else { return }
+        guard
+            let next = AutomationQueue.nextAutomatic(
+                runs: automationRuns, inFlight: automationInFlight, automatic: automaticRunIds)
+        else { return }
+        launch(next, automatic: true)
+    }
+
+    /// Why the board cannot start this queued run right now, in the words it
+    /// shows on the button, or nil when it can.
+    func automationBlock(for run: AutomationRun) -> String? {
+        // The switch being off holds the queue where it is rather than
+        // emptying it: the rows stay, and turning it back on resumes them.
+        // Nothing may start while it is off, by hand no more than by itself.
+        guard automationSettings.enabled else { return "「タスクが増えたときのコマンド」がオフです" }
+        return AutomationQueue.block(run: run, inFlight: automationInFlight)
+    }
+
+    /// Starts a queued run now because the user asked for it, past the
+    /// automatic lane's one-at-a-time pace and up to the ceiling.
+    func startQueuedRun(_ run: AutomationRun) {
+        guard automationBlock(for: run) == nil else { return }
+        launch(run, automatic: false)
+    }
+
+    /// Drops a queued run the user does not want after all.
+    ///
+    /// Recorded as a failed run rather than deleted: the row is why the task
+    /// says something already handled it, and 「もう一度動けるようにする」 is
+    /// the one gesture that clears both. Deleting it would leave a task
+    /// nothing plans again and nothing explains.
+    func cancelQueuedRun(_ run: AutomationRun) async {
+        guard let store, run.state == .queued, automationInFlight[run.id] == nil else { return }
+        try? await store.finishAutomationRun(
+            id: run.id, state: .failed, reason: Self.cancelledReason)
+        try? await store.setAutomation(
+            taskId: run.taskId, state: .failed,
+            artifactPath: tasks.first { $0.id == run.taskId }?.artifactPath)
+        await refreshLists()
+    }
+
+    static let cancelledReason = "待機を取り消しました"
+
+    /// Takes a slot and starts the command in the background.
+    ///
+    /// The in-flight lists are written before anything is awaited, and they —
+    /// not the store — are what the queue's next decision reads: only this
+    /// process starts commands, and a refresh can land between taking the slot
+    /// and writing the row.
+    private func launch(_ run: AutomationRun, automatic: Bool) {
+        automationInFlight[run.id] = run.taskId
+        if automatic { automaticRunIds.insert(run.id) }
+        if let index = automationRuns.firstIndex(where: { $0.id == run.id }) {
+            automationRuns[index].state = .running
+            automationRuns[index].startedAt = Date()
+        }
+        Task { await execute(run) }
+    }
+
+    /// Rebuilds what the trigger needs from the stored row, runs the command,
+    /// and hands the slot back.
+    ///
+    /// The row was planned by an earlier pass, possibly by an earlier launch of
+    /// the app, so nothing here may assume the pass's own state: the task is
+    /// read back from the store, a label run finds its rule again by name, and
+    /// a comment run rebuilds its event from the row. Each of those can now be
+    /// gone, and a run that cannot say what it would execute fails saying so.
+    private func execute(_ run: AutomationRun) async {
+        guard let store else { return }
+        let settings = automationSettings
+        let stored = (try? await store.tasks(includeArchived: true)) ?? []
+        guard let task = stored.first(where: { $0.id == run.taskId }) else {
+            await finish(run, task: nil, outcome: .failed("タスクがもうありません"), success: "")
+            return
+        }
+        var rule: LabelRule?
+        if run.trigger == .label {
+            guard let matched = run.matchedLabel,
+                let found = settings.labelRules.first(where: {
+                    $0.isUsable && LabelTrigger.matches(labels: [matched], label: $0.label)
+                })
+            else {
+                await finish(
+                    run, task: task,
+                    outcome: .failed("\(run.matchedLabel ?? "ラベル") のルールがありません"),
+                    success: "")
+                return
+            }
+            rule = found
+        }
+        var event: CommentEvent?
+        if run.trigger == .comment {
+            guard
+                let rebuilt = CommentEvent(id: run.id, url: run.commentUrl, author: run.author)
+            else {
+                await finish(
+                    run, task: task, outcome: .failed("レビューコメントを読めませんでした"),
+                    success: "")
+                return
+            }
+            event = rebuilt
+        }
+        try? await store.startAutomationRun(id: run.id)
+        try? await store.setAutomation(taskId: task.id, state: .running)
+        await refreshLists()
+        let outcome = await automationRunner.run(
+            task: task, settings: settings, trigger: run.trigger, event: event, labelRule: rule)
+        let success =
+            switch run.trigger {
+            case .arrival: "\(task.title) の生成物ができました"
+            case .label: "\(task.title) を \(run.matchedLabel ?? "ラベル") で実行しました"
+            case .comment: "\(run.author ?? "bot") のレビューに対して実行しました"
+            }
+        await finish(run, task: task, outcome: outcome, success: success)
+    }
+
+    /// Writes how a run ended, to the run row and to the task, hands the slot
+    /// back, and lets the queue start whatever is next.
+    private func finish(
+        _ run: AutomationRun, task: TaskItem?, outcome: AutomationRunner.Outcome, success: String
     ) async {
+        automationInFlight[run.id] = nil
+        automaticRunIds.remove(run.id)
         guard let store else { return }
         let stamp = Date().formatted(date: .omitted, time: .shortened)
         switch outcome {
         case .produced(let path):
             try? await store.finishAutomationRun(id: run.id, state: .done, artifactPath: path)
-            try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
+            if let task {
+                try? await store.setAutomation(taskId: task.id, state: .done, artifactPath: path)
+            }
             automationStatus = "\(stamp) \(success)"
         case .failed(let reason, let path):
             try? await store.finishAutomationRun(
                 id: run.id, state: .failed, reason: reason, artifactPath: path)
             // A failure that wrote nothing keeps the folder an earlier run
             // left on the task; there is nothing newer to point at.
-            try? await store.setAutomation(
-                taskId: task.id, state: .failed, artifactPath: path ?? task.artifactPath)
-            automationStatus = "\(stamp) \(task.title): \(reason)"
+            if let task {
+                try? await store.setAutomation(
+                    taskId: task.id, state: .failed, artifactPath: path ?? task.artifactPath)
+            }
+            automationStatus = "\(stamp) \(task?.title ?? run.title): \(reason)"
         }
         await refreshLists()
+        pumpAutomationQueue()
     }
 
     // MARK: - Review-comment command
 
-    /// Runs the user's command once for each pull request of theirs a bot has
-    /// just reviewed.
+    /// Queues the user's command once for each pull request of theirs a bot
+    /// has just reviewed.
     ///
-    /// The event is recorded before the command starts, exactly like the
-    /// arrival pass writes the row's state first: an interrupted run has to
-    /// look like "already handled", because the alternative is an agent
-    /// started twice on the same review.
+    /// The event is recorded as a queued run before anything starts, exactly
+    /// as it used to be recorded before the command started: an interrupted
+    /// run has to look like "already handled", because the alternative is an
+    /// agent started twice on the same review. The row carries the comment's
+    /// link and author, since its turn may come after a restart.
     func runCommentPass() async {
-        guard let store, !automationRunning else { return }
+        guard let store else { return }
         let settings = automationSettings
         let existing = (try? await store.tasks(includeArchived: true)) ?? []
         let candidates = CommentTrigger.candidates(tasks: existing, settings: settings)
@@ -577,26 +718,11 @@ final class AppModel {
                 + "（\(settings.commentDailyLimit) 回）に達したので実行しませんでした"
         }
         guard !selection.run.isEmpty else { return }
-
-        automationRunning = true
-        defer { automationRunning = false }
         let byId = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for event in selection.run {
-            guard let task = byId[event.taskId] else { continue }
-            let run = AutomationRun(
-                id: event.id, taskId: task.id, title: task.title,
-                url: GitHubTaskSync.url(fromDetail: task.detail), trigger: .comment,
-                author: event.author, startedAt: Date(),
-                relation: GitHubTaskSync.relation(fromDetail: task.detail))
-            try? await store.recordAutomationRun(run)
-            try? await store.setAutomation(taskId: task.id, state: .running)
-            await refreshLists()
-            let outcome = await automationRunner.run(
-                task: task, settings: settings, trigger: .comment, event: event)
-            await finishRun(
-                run, task: task, outcome: outcome,
-                success: "\(event.author) のレビューに対して実行しました")
-        }
+        await enqueue(
+            selection.run.compactMap { event in
+                byId[event.taskId].map { PlannedRun(task: $0, trigger: .comment, event: event) }
+            })
     }
 
     /// Clears one row's result so the command can run again, for the case
@@ -621,6 +747,10 @@ final class AppModel {
         try? await store.interruptRunningAutomation()
         labels = (try? await store.labels()) ?? [:]
         await refreshLists()
+        // The queue survives a restart, so whatever was still waiting when the
+        // app was quit is picked up here rather than waiting for the next
+        // GitHub pass.
+        pumpAutomationQueue()
     }
 
     // MARK: - Housekeeping

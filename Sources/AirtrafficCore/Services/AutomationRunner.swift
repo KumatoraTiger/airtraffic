@@ -1,10 +1,16 @@
 import Foundation
 
-/// Runs one task's command, one at a time, and reports what it left behind.
+/// Runs one task's command and reports what it left behind.
 ///
-/// An actor because the whole point is serialization: several review requests
-/// can land in one GitHub pass, and starting a coding agent per row at once is
-/// how a laptop stops answering.
+/// It no longer decides HOW MANY commands run: `AutomationQueue` does, by
+/// handing out the slots, and this type starts whatever it is given. What it
+/// still guarantees is that waiting for an agent costs no thread — the wait is
+/// a suspension, so several runs can be in flight on this one actor while its
+/// executor stays free for the next spawn.
+///
+/// An actor rather than a struct so the spawning itself (creating the output
+/// directory, walking it, starting the process) stays off the main thread,
+/// where the board is being drawn.
 public actor AutomationRunner {
     public enum Outcome: Sendable, Equatable {
         /// The command finished and left something behind in this directory.
@@ -21,11 +27,10 @@ public actor AutomationRunner {
         case failed(String, artifactPath: String? = nil)
     }
 
-    /// How long one command may hold the queue.
+    /// How long one command may hold its slot.
     ///
     /// This is not a policy on how long an agent may work — it is what stops a
-    /// wedged run from blocking every later one, since this actor runs them one
-    /// at a time.
+    /// wedged run from holding one of the queue's three slots for good.
     ///
     /// Three hours, set by the longest job of the three triggers: implementing
     /// a labelled issue means reading it, writing the code, getting the tests
@@ -67,7 +72,7 @@ public actor AutomationRunner {
     public func run(
         task: TaskItem, settings: AutomationSettings, trigger: AutomationTrigger = .arrival,
         event: CommentEvent? = nil, labelRule: LabelRule? = nil
-    ) -> Outcome {
+    ) async -> Outcome {
         let directory = TaskAutomation.artifactDirectory(base: base, taskId: task.id)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -117,16 +122,27 @@ public actor AutomationRunner {
         } catch {
             return .failed("起動できませんでした: \(error.localizedDescription)")
         }
-        var timedOut = false
-        let watchdog = DispatchWorkItem {
+        let watchdog = Flag()
+        let expiry = DispatchWorkItem {
             if process.isRunning {
-                timedOut = true
+                watchdog.raise()
                 process.terminate()
             }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: watchdog)
-        process.waitUntilExit()
-        watchdog.cancel()
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout, execute: expiry)
+        // Waited for on a background queue, not here: `waitUntilExit` blocks
+        // the thread it is called on for as long as the agent works, and with
+        // three runs allowed at once that thread would be this actor's
+        // executor — the next run could not even be spawned. Suspending
+        // instead is what makes the slots real.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                continuation.resume()
+            }
+        }
+        expiry.cancel()
+        let timedOut = watchdog.isRaised
         // Whether anything was written is checked BEFORE the exit code: a
         // wrapper that fails on purpose still writes its reason to the
         // output directory, and that reason must stay reachable.
@@ -164,6 +180,25 @@ public actor AutomationRunner {
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         return nil
+    }
+
+    /// One bit, set from the watchdog's queue and read once the process is
+    /// gone. A local `var` would be written and read from two threads.
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func raise() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        var isRaised: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
     }
 
     /// One file as it was at one moment. Comparing these sets before and

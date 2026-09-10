@@ -123,7 +123,8 @@ public actor Store {
                 reason TEXT,
                 artifact_path TEXT,
                 relation TEXT,
-                matched_label TEXT
+                matched_label TEXT,
+                comment_url TEXT
             );
             """)
         // The kind of GitHub row a run fired on, so the board's badge can name
@@ -138,6 +139,13 @@ public actor Store {
         // and their badge falls back to 「ラベル」.
         if !columns.contains("matched_label") {
             try db.execute("ALTER TABLE automation_runs ADD COLUMN matched_label TEXT")
+        }
+        // The link to the review comment that fired a comment run. A queued
+        // run outlives the pass that planned it, so its command line's
+        // `{commentUrl}` has to be readable off the row itself. Rows written
+        // before this column answer nil and cannot be started, only read.
+        if !columns.contains("comment_url") {
+            try db.execute("ALTER TABLE automation_runs ADD COLUMN comment_url TEXT")
         }
         let tables = try db.query("SELECT name FROM sqlite_master WHERE type = 'table'")
             .map { $0.text("name") }
@@ -358,8 +366,8 @@ public actor Store {
         try db.execute(
             """
             INSERT OR IGNORE INTO automation_runs
-                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path, relation, matched_label)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, task_id, title, url, trigger, author, started_at, finished_at, state, reason, artifact_path, relation, matched_label, comment_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 .text(run.id), .text(run.taskId), .text(run.title),
@@ -373,7 +381,21 @@ public actor Store {
                 run.artifactPath.map { .text($0) } ?? .null,
                 run.relation.map { .text($0.rawValue) } ?? .null,
                 run.matchedLabel.map { .text($0) } ?? .null,
+                run.commentUrl.map { .text($0) } ?? .null,
             ])
+    }
+
+    /// Moves a queued run to `running` and stamps when the command actually
+    /// started.
+    ///
+    /// The row was written when it was planned, and `started_at` held the
+    /// waiting time until now: overwriting it is what makes the board's
+    /// elapsed clock count the command rather than the wait. The id keeps the
+    /// planning stamp, since a run is identified by it.
+    public func startAutomationRun(id: String, startedAt: Date = Date()) throws {
+        try db.execute(
+            "UPDATE automation_runs SET state = 'running', started_at = ? WHERE id = ?",
+            [.real(startedAt.timeIntervalSince1970), .text(id)])
     }
 
     /// Records how a run ended.
@@ -398,6 +420,11 @@ public actor Store {
     /// that say the same. Only the app starts these commands and nothing
     /// survives its exit, so at launch a `running` row can only be a run the
     /// previous process never got to finish writing.
+    ///
+    /// A `queued` row is deliberately left alone: nothing was started for it,
+    /// so there is nothing to report as interrupted, and the queue is meant to
+    /// survive a restart — the board offers it again as soon as the window is
+    /// back.
     public func interruptRunningAutomation(now: Date = Date()) throws {
         try db.execute(
             """
@@ -420,6 +447,7 @@ public actor Store {
                 url: row.textOrNil("url"),
                 trigger: AutomationTrigger(rawValue: row.text("trigger")) ?? .comment,
                 author: row.textOrNil("author"),
+                commentUrl: row.textOrNil("comment_url"),
                 matchedLabel: row.textOrNil("matched_label"),
                 startedAt: Date(timeIntervalSince1970: row.real("started_at")),
                 finishedAt: row.realOrNil("finished_at").map(Date.init(timeIntervalSince1970:)),
@@ -446,9 +474,13 @@ public actor Store {
 
     /// Housekeeping only: a run this old names a comment no pass will see
     /// again, and has long left the board.
+    ///
+    /// A queued run is kept whatever its age. It is not history, it is work
+    /// the user can still start, and deleting the row while the task still
+    /// says `queued` would leave a row nothing can ever run or clear.
     public func pruneAutomationRuns(olderThan age: TimeInterval, now: Date = Date()) throws {
         try db.execute(
-            "DELETE FROM automation_runs WHERE started_at < ?",
+            "DELETE FROM automation_runs WHERE started_at < ? AND state <> 'queued'",
             [.real(now.timeIntervalSince1970 - age)])
     }
 

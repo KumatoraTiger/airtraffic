@@ -222,6 +222,14 @@ struct AutomationSection: View {
             )
             .font(.caption)
             .foregroundStyle(.secondary)
+            Text(
+                "同時に動かせるコマンドは \(AutomationQueue.limit) 件までです。"
+                    + "アプリが自分で動かすのは1件ずつで、残りはボードの自動実行の行に「待機」として並びます。"
+                    + "待機の行の再生ボタンを押すと、上限まで並行して動かせます。"
+                    + "待機はアプリを終了しても残ります。"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
             if let status = model.automationStatus {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }

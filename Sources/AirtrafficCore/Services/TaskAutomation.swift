@@ -2,6 +2,14 @@ import Foundation
 
 /// What the automation did with a task, so a command runs at most once per row.
 public enum AutomationState: String, Codable, Sendable {
+    /// It is planned and waiting for a free slot. Written as soon as the row
+    /// is planned, exactly like `running` used to be, so the row cannot be
+    /// planned twice; the command itself has not started.
+    ///
+    /// An installed build on the older schema reads an unknown state as
+    /// `failed`, which is the safe direction: it leaves the row alone rather
+    /// than starting a command this build already has a queue entry for.
+    case queued
     /// The command is running right now.
     case running
     /// It finished and left something behind.

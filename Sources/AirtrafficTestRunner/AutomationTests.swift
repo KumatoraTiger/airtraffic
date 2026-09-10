@@ -43,6 +43,15 @@ struct AutomationTests {
             automationState: state, automationLabels: ran)
     }
 
+    /// A run the queue is holding: `startedAt` is when it was planned until
+    /// the command starts, so it doubles as the waiting time.
+    private func queuedRun(id: String, taskId: String, waiting: TimeInterval = 0) -> AutomationRun {
+        AutomationRun(
+            id: id, taskId: taskId, title: "issue #7 検索を速くする", trigger: .label,
+            matchedLabel: "ai", startedAt: Date().addingTimeInterval(-waiting), state: .queued,
+            relation: .assigned)
+    }
+
     private func labelSettings(
         enabled: Bool = true, labelTrigger: Bool = true, label: String = "ai",
         labelCommand: String = "/usr/bin/true {url}", repos: Set<String> = ["alex/demo"]
@@ -693,6 +702,112 @@ struct AutomationTests {
             expect(
                 FileManager.default.fileExists(atPath: fresh.path),
                 "the directory written to today stays")
+        }
+
+        // MARK: - The queue
+
+        await kit.run("the queue drains oldest first") {
+            let old = queuedRun(id: "ghl:1", taskId: "gh:alex/demo#7", waiting: 600)
+            let recent = queuedRun(id: "ghl:2", taskId: "gh:alex/demo#8", waiting: 60)
+            expectEqual(AutomationQueue.waiting([recent, old]).map(\.id), ["ghl:1", "ghl:2"])
+            expectEqual(
+                AutomationQueue.nextAutomatic(
+                    runs: [recent, old], inFlight: [:], automatic: [])?.id, "ghl:1")
+        }
+
+        await kit.run("the app starts one command by itself and leaves the rest to the user") {
+            let runs = [
+                queuedRun(id: "ghl:1", taskId: "gh:alex/demo#7"),
+                queuedRun(id: "ghl:2", taskId: "gh:alex/demo#8"),
+            ]
+            // Its own lane is taken, so it starts nothing more on its own —
+            // while the ceiling still has room for what the user starts.
+            let mine = ["ghl:1": "gh:alex/demo#7"]
+            expect(
+                AutomationQueue.nextAutomatic(runs: runs, inFlight: mine, automatic: ["ghl:1"])
+                    == nil, "the automatic lane is one wide")
+            expect(
+                AutomationQueue.block(run: runs[1], inFlight: mine) == nil,
+                "the user can still start the next one by hand")
+        }
+
+        await kit.run("three commands at once is the ceiling, whoever started them") {
+            let queued = queuedRun(id: "ghl:9", taskId: "gh:alex/demo#9")
+            let full = [
+                "ghl:1": "gh:alex/demo#1", "ghl:2": "gh:alex/demo#2", "ghl:3": "gh:alex/demo#3",
+            ]
+            expectEqual(AutomationQueue.limit, 3)
+            expectEqual(
+                AutomationQueue.block(run: queued, inFlight: full), "同時に実行できるのは 3 件までです")
+            expect(
+                AutomationQueue.nextAutomatic(runs: [queued], inFlight: full, automatic: []) == nil,
+                "nothing starts once the ceiling is reached, even in the automatic lane")
+        }
+
+        await kit.run("one task never runs two commands at once") {
+            let queued = queuedRun(id: "ghl:2", taskId: "gh:alex/demo#7")
+            let sameTask = ["ghl:1": "gh:alex/demo#7"]
+            expectEqual(
+                AutomationQueue.block(run: queued, inFlight: sameTask), "同じタスクのコマンドが実行中です")
+            expect(
+                AutomationQueue.nextAutomatic(runs: [queued], inFlight: sameTask, automatic: [])
+                    == nil, "the queue waits for that row's own command to finish")
+            // The row itself, already started, is not offered a second time.
+            expectEqual(
+                AutomationQueue.block(run: queued, inFlight: ["ghl:2": "gh:alex/demo#7"]),
+                "すでに実行中です")
+        }
+
+        await kit.run("a row with a command already waiting plans no label rule") {
+            let task = issueTask(state: .queued)
+            expect(
+                LabelTrigger.plan(
+                    tasks: [task], labels: [task.id: ["ai"]], settings: labelSettings()
+                ).isEmpty,
+                "a second label waits for the queued command to finish")
+        }
+
+        await kit.run("a queued comment run is rebuilt from its own row") {
+            let event = CommentEvent(
+                taskId: "gh:alex/demo#7", repo: "alex/demo", number: 7, commentId: 31,
+                url: "https://github.com/alex/demo/pull/7#discussion_r31",
+                author: "coderabbitai[bot]")
+            let rebuilt = try unwrap(
+                CommentEvent(id: event.id, url: event.url, author: event.author))
+            expectEqual(rebuilt, event)
+            // A row an older build wrote carries no link, and a run that
+            // cannot say what it would execute must not execute anything.
+            expect(
+                CommentEvent(id: event.id, url: nil, author: event.author) == nil,
+                "no link, no run")
+            expect(
+                CommentEvent(id: "gha:gh:alex/demo#7@123", url: event.url, author: "bot") == nil,
+                "an arrival run's id spells no event")
+        }
+
+        await kit.run("two commands run at the same time") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            let runner = AutomationRunner(base: base)
+            // Each writes a file after sleeping: serialized, the pair takes
+            // two seconds. What is being tested is that waiting for one
+            // command does not hold the runner — the reason a slot is a slot.
+            let settings = AutomationSettings(
+                enabled: true,
+                commandLine: "/bin/sh -c 'sleep 1; echo ok > \"$0/log.txt\"' {outDir}",
+                workingDirectory: "/tmp", allowedRepos: ["alex/demo"])
+            let started = Date()
+            async let first = runner.run(task: reviewTask(number: 21), settings: settings)
+            async let second = runner.run(task: reviewTask(number: 22), settings: settings)
+            let outcomes = await [first, second]
+            let elapsed = Date().timeIntervalSince(started)
+            for outcome in outcomes {
+                guard case .produced = outcome else {
+                    return expect(false, "both should produce output, got \(outcome)")
+                }
+            }
+            expect(elapsed < 1.8, "the two overlapped (took \(elapsed)s)")
         }
 
         await kit.run("an artifact directory is one flat name per task") {

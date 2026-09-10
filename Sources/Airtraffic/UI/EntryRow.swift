@@ -329,6 +329,11 @@ struct EntryRow: View {
     @ViewBuilder
     private func automationBadge(_ task: TaskItem) -> some View {
         switch task.automationState {
+        case .queued:
+            Image(systemName: "clock")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .help("コマンドの実行を待っています")
         case .running:
             ProgressView()
                 .controlSize(.mini)

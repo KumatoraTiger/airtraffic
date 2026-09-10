@@ -349,6 +349,42 @@ struct StoreTests {
             expectEqual(try await store.tasks().first?.automationState, .failed)
         }
 
+        await TestKit.shared.run("store: a queued run survives a launch and keeps its link") {
+            let (store, path) = try makeStore()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let task = TaskItem(
+                id: "gh:alex/demo#7", title: "PR #7 直す", detail: "", status: .todo, rank: nil,
+                source: .github, createdAt: Date(), updatedAt: Date(), sessionIds: [])
+            try await store.upsertTask(task)
+            try await store.setAutomation(taskId: task.id, state: .queued)
+            try await store.recordAutomationRun(
+                AutomationRun(
+                    id: "ghc:alex/demo#7@31", taskId: task.id, title: task.title,
+                    trigger: .comment, author: "coderabbitai[bot]",
+                    commentUrl: "https://github.com/alex/demo/pull/7#discussion_r31",
+                    startedAt: Date(timeIntervalSince1970: 1_000), state: .queued))
+
+            // Nothing was started for it, so a launch has nothing to report as
+            // interrupted and the queue is meant to outlive the process.
+            try await store.interruptRunningAutomation(now: Date(timeIntervalSince1970: 9_000))
+            // And age alone never deletes it: it is work, not history.
+            try await store.pruneAutomationRuns(
+                olderThan: 30 * 24 * 3600, now: Date(timeIntervalSince1970: 9_000_000))
+
+            let waiting = try unwrap(try await store.automationRuns().first)
+            expectEqual(waiting.state, .queued)
+            expectEqual(
+                waiting.commentUrl, "https://github.com/alex/demo/pull/7#discussion_r31")
+            expectEqual(try await store.tasks().first?.automationState, .queued)
+
+            try await store.startAutomationRun(
+                id: waiting.id, startedAt: Date(timeIntervalSince1970: 9_100))
+            let started = try unwrap(try await store.automationRuns().first)
+            expectEqual(started.state, .running)
+            // The clock now counts the command, not the wait before it.
+            expectEqual(started.startedAt, Date(timeIntervalSince1970: 9_100))
+        }
+
         await TestKit.shared.run("store: deleteTask removes the row and its links") {
             let (store, path) = try makeStore()
             defer { try? FileManager.default.removeItem(atPath: path) }

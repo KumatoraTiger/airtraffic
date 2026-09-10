@@ -86,7 +86,9 @@ public enum LabelTrigger {
     /// `automationState` held it back, so the second label did nothing.)
     ///
     /// `automationState` still matters in one way: a row whose command is
-    /// running is left alone, because one row runs one command at a time.
+    /// already queued or running is left alone, because one row runs one
+    /// command at a time. A second label put on such a row is planned once
+    /// the first command has finished, not alongside it.
     public static func plan(
         tasks: [TaskItem], labels: [String: [String]], settings: AutomationSettings,
         limit: Int = runLimit
@@ -98,7 +100,10 @@ public enum LabelTrigger {
         guard rules.contains(where: \.isUsable) else { return [] }
         return Array(
             tasks.compactMap { task -> Match? in
-                guard task.source == .github, task.automationState != .running else { return nil }
+                guard task.source == .github else { return nil }
+                guard task.automationState != .running, task.automationState != .queued else {
+                    return nil
+                }
                 guard task.status != .archived, task.status != .done else { return nil }
                 // Only issues assigned to the user: the label is read off the
                 // assigned search, and that is the only search this app asks

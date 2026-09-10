@@ -31,6 +31,32 @@ public struct CommentEvent: Sendable, Equatable {
     /// The key that makes the run happen once. Stored before the command
     /// starts, so a crash mid-run never turns into a second run.
     public var id: String { "ghc:\(repo)#\(number)@\(commentId)" }
+
+    /// Reads an event back out of the run row it was stored as.
+    ///
+    /// A comment run now waits in a queue that outlives the pass that planned
+    /// it, and the pull request's comments are not fetched again when its turn
+    /// comes: the event has to be reconstructible from the row alone. The id
+    /// carries the repository, the number and the comment; the link and the
+    /// login are columns of their own.
+    ///
+    /// Nil for a row whose id does not spell an event (a run written before
+    /// this format) or one missing its link — those stay readable as history
+    /// and cannot be started.
+    public init?(id: String, url: String?, author: String?) {
+        guard let url, let author else { return nil }
+        guard id.hasPrefix("ghc:") else { return nil }
+        let body = id.dropFirst("ghc:".count)
+        guard let hash = body.firstIndex(of: "#"), let at = body.lastIndex(of: "@"), hash < at
+        else { return nil }
+        guard let number = Int(body[body.index(after: hash)..<at]),
+            let commentId = Int(body[body.index(after: at)...])
+        else { return nil }
+        let repo = String(body[body.startIndex..<hash])
+        self.init(
+            taskId: GitHubItem.taskId(repo: repo, number: number),
+            repo: repo, number: number, commentId: commentId, url: url, author: author)
+    }
 }
 
 /// Where a pull request's checks stand, as far as the trigger cares.
