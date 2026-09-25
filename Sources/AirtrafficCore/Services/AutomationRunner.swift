@@ -102,6 +102,11 @@ public actor AutomationRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = Array(arguments.dropFirst())
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = (Self.commandSearchPaths + [environment["PATH"] ?? ""])
+            .filter { !$0.isEmpty }
+            .joined(separator: ":")
+        process.environment = environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let workingDirectory = TaskAutomation.workingDirectory(
             setting: settings.workingDirectory, values: values, home: home)
@@ -165,6 +170,13 @@ public actor AutomationRunner {
 
     // MARK: - Helpers
 
+    private static var commandSearchPaths: [String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return searchDirectories.map { directory in
+            directory.hasPrefix("/") ? directory : "\(home)/\(directory)"
+        }
+    }
+
     /// An absolute path is taken as given; a bare name is looked up in the
     /// usual install directories. Nothing is resolved through a shell, so a
     /// command the user did not name cannot be reached.
@@ -173,10 +185,8 @@ public actor AutomationRunner {
             let path = (command as NSString).expandingTildeInPath
             return FileManager.default.isExecutableFile(atPath: path) ? path : nil
         }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        for directory in Self.searchDirectories {
-            let root = directory.hasPrefix("/") ? directory : "\(home)/\(directory)"
-            let path = "\(root)/\(command)"
+        for directory in Self.commandSearchPaths {
+            let path = "\(directory)/\(command)"
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         return nil

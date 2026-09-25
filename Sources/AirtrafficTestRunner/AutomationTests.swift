@@ -392,6 +392,30 @@ struct AutomationTests {
             }
         }
 
+        await kit.run("a command receives the runner's search paths") {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: base) }
+            let runner = AutomationRunner(base: base)
+            let settings = AutomationSettings(
+                enabled: true,
+                commandLine: "/bin/sh -c 'printf \"%s\" \"$PATH\" > \"$0/path.txt\"' {outDir}",
+                workingDirectory: "/tmp", allowedRepos: ["alex/demo"])
+
+            guard
+                case .produced(let directory) = await runner.run(
+                    task: reviewTask(), settings: settings)
+            else { return expect(false, "the command should write its PATH") }
+            let path = try String(
+                contentsOfFile: directory + "/path.txt", encoding: .utf8)
+            expect(
+                path.hasPrefix("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"),
+                "known command locations precede the inherited PATH")
+            if let inherited = ProcessInfo.processInfo.environment["PATH"], !inherited.isEmpty {
+                expect(path.hasSuffix(inherited), "the inherited PATH remains available")
+            }
+        }
+
         await kit.run("a rerun that overwrites the same file still counts as produced") {
             let base = FileManager.default.temporaryDirectory
                 .appendingPathComponent("airtraffic-runner-\(UUID().uuidString)", isDirectory: true)
