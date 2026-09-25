@@ -279,6 +279,7 @@ final class AppModel {
     private var lastGitHubPass = Date.distantPast
     private var lastHousekeeping = Date.distantPast
     private var githubPassRunning = false
+    private var githubPassRequested = false
     /// The labels of the open issues the last GitHub pass read, by task id.
     /// Kept in memory only: it is what that one pass saw, and the next pass
     /// replaces it. Nothing runs from a stale answer, so nothing is stored.
@@ -423,9 +424,20 @@ final class AppModel {
     /// taking back an import would only mean the next pass writes it again.
     /// The way to dismiss one is to archive it, which the sync respects.
     func runGitHubPass() async {
-        guard let store, !githubPassRunning else { return }
+        guard let store else { return }
+        if githubPassRunning {
+            githubPassRequested = true
+            return
+        }
         githubPassRunning = true
         defer { githubPassRunning = false }
+        repeat {
+            githubPassRequested = false
+            await syncGitHubOnce(store: store)
+        } while githubPassRequested
+    }
+
+    private func syncGitHubOnce(store: Store) async {
         lastGitHubPass = Date()
 
         // Archived rows are what tells the sync "the user dismissed this one",
@@ -737,6 +749,9 @@ final class AppModel {
         try? await store.setAutomation(taskId: taskId, state: nil)
         try? await store.setAutomationLabels(taskId: taskId, labels: [])
         await refreshLists()
+        if githubEnabled, tasks.contains(where: { $0.id == taskId && $0.source == .github }) {
+            await runGitHubPass()
+        }
     }
 
     private func refreshFromStore() async {
